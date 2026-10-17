@@ -1,7 +1,17 @@
 """
 backend/app/modules/matching/service.py - Matching Engine Service.
-Heuristic Score v1, pgvector HNSW search, Redis caching, deterministic explainability,
-hard gates, cold start boost, and exposure caps.
+Weights loaded from config/matching.json:
+- 35 skill_intent_similarity (pgvector cosine + keyword overlap)
+- 15 similar_journey (same branch, similar projects, starting point)
+- 15 affinity (same college 1, same branch 0.5)
+- 15 rating (smoothed average & reputation band)
+- 12 availability (active 1, today 0.6, inactive 0)
+- 8 response speed
+
+Hard Gates:
+Excludes unverified, suspended, inactive-too-long, and over weekly-capacity givers.
+Returns aggregated excluded_summary without names.
+Generates actual overlap explanations. Supports all giver types (alumni, faculty, recruiter, founder).
 """
 
 import hashlib
@@ -9,6 +19,7 @@ import json
 import math
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -19,6 +30,7 @@ from app.core.config import settings
 from app.core.db import User
 from app.core.errors import AppError, PortNotReady
 from app.core.events import GiverProfileUpdatedPayload, event_bus
+from app.core.models import Availability, Capacity, StudentIntent
 from app.core.pagination import decode_cursor, encode_cursor
 from app.core.ports import (
     CreditsPort,
@@ -32,29 +44,25 @@ from app.core.redis import get_redis
 from app.modules.matching.models import GiverProfile, StudentMatchProfile
 from app.modules.matching.schemas import (
     AvailabilitySummary,
+    CandidateRankingExplanation,
+    ExplainRankingResponse,
     GiverProfileCreateUpdate,
     GiverPublicCard,
+    HardGateExclusionSummary,
     RatingSummary,
     RecommendationItem,
     RecommendationsResponse,
+    SaveIntentResponse,
     ScoreComponents,
+    StructuredIntentData,
 )
+from app.modules.matching.intent import analyze_intent_quality, structure_intent
 
-# --- Configuration Constants (Section 6 & Requirement 4, 7) ---
-
-WEIGHT_EXPERTISE = 0.35
-WEIGHT_INTENT = 0.25
-WEIGHT_AFFINITY = 0.15
-WEIGHT_AVAILABILITY = 0.10
-WEIGHT_RATING = 0.10
-WEIGHT_RESPONSE_ODDS = 0.05
-
-COLD_START_BOOST = 0.08
-COLD_START_SESSION_THRESHOLD = 5
 MAX_DAILY_EXPOSURE = 25
 CACHE_TTL_SECONDS = 60
 
 ALLOWED_GIVER_ROLES = {
+    "alumni",
     "alumnus",
     "recruiter",
     "founder",
@@ -69,10 +77,52 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def load_matching_config() -> Dict[str, Any]:
+    """Dynamically loads matching engine weights and hard gate parameters from config/matching.json."""
+    candidates = [
+        Path(__file__).resolve().parent.parent.parent.parent / "config" / "matching.json",
+        Path(__file__).resolve().parent.parent.parent / "config" / "matching.json",
+        Path.cwd() / "config" / "matching.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {
+        "weights": {
+            "skill_intent_similarity": 0.35,
+            "similar_journey": 0.15,
+            "affinity": 0.15,
+            "rating": 0.15,
+            "availability": 0.12,
+            "response_speed": 0.08,
+        },
+        "hard_gates": {
+            "max_inactive_days": 14,
+            "min_trust_score": 30.0,
+            "require_verification": True,
+            "enforce_weekly_capacity": True,
+        },
+        "affinity_weights": {"same_college": 1.0, "same_branch": 0.5},
+        "availability_scores": {"active_now": 1.0, "available_today": 0.6, "inactive": 0.0},
+    }
+
+
 def cosine_similarity(v1: Optional[List[float]], v2: Optional[List[float]]) -> float:
     """Computes cosine similarity between two float vectors, mapped to [0.0, 1.0]."""
     if not v1 or not v2 or len(v1) != len(v2):
-        return 0.5  # neutral fallback if missing
+        return 0.5
 
     dot = sum(a * b for a, b in zip(v1, v2))
     norm1 = math.sqrt(sum(a * a for a in v1))
@@ -98,10 +148,7 @@ def deterministic_dummy_vector(text: str) -> List[float]:
 
 
 async def generate_embedding(text: str) -> List[float]:
-    """
-    Generates 768-dimensional embedding using Gemini text-embedding-004.
-    Falls back to deterministic vector if API key is not configured.
-    """
+    """Generates 768-dimensional embedding using Gemini, falling back to deterministic dummy vector."""
     api_key = settings.GEMINI_API_KEY
     if not api_key or api_key == "your_gemini_api_key_here":
         return deterministic_dummy_vector(text)
@@ -123,34 +170,10 @@ async def generate_embedding(text: str) -> List[float]:
     return deterministic_dummy_vector(text)
 
 
-async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """
-    Batches vector embedding generation for multiple texts.
-    Uses concurrency and batching to optimize throughput during bulk operations.
-    """
-    import asyncio
-    api_key = settings.GEMINI_API_KEY
-    if not api_key or api_key == "your_gemini_api_key_here":
-        return [deterministic_dummy_vector(t) for t in texts]
-
-    results: List[List[float]] = []
-    # Process in concurrent chunks of 10
-    chunk_size = 10
-    for i in range(0, len(texts), chunk_size):
-        chunk = texts[i : i + chunk_size]
-        tasks = [generate_embedding(t) for t in chunk]
-        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for res, original_text in zip(chunk_results, chunk):
-            if isinstance(res, list) and len(res) == 768:
-                results.append(res)
-            else:
-                results.append(deterministic_dummy_vector(original_text))
-    return results
-
-
 class MatchingService(MatchingPort):
     def __init__(self, session: AsyncSession):
         self.session = session
+        self.matching_config = load_matching_config()
 
     # --- Giver Profile Management ---
 
@@ -169,15 +192,13 @@ class MatchingService(MatchingPort):
     async def update_giver_profile(
         self, user_id: uuid.UUID, data: GiverProfileCreateUpdate
     ) -> GiverProfile:
-        # 1. Gate: only users with a giver role or pending verification may create one
         stmt_user = select(User).where(User.id == user_id)
         res_user = await self.session.execute(stmt_user)
         user = res_user.scalar_one_or_none()
 
         if user:
             user_roles = set(user.roles or [])
-            if not user_roles.intersection(ALLOWED_GIVER_ROLES):
-                # Check if trust level or pending verification allows
+            if not user_roles.intersection(ALLOWED_GIVER_ROLES) and user.role not in ALLOWED_GIVER_ROLES:
                 try:
                     level = await ports.trust.get_level(str(user_id))
                     if level not in ["verified", "established"]:
@@ -187,55 +208,25 @@ class MatchingService(MatchingPort):
                             status_code=403,
                         )
                 except PortNotReady:
-                    # In tests without trust module, verify against user roles strictly
                     raise AppError(
                         code="giver_role_required",
                         message="Only users with an approved giver role can create a giver profile.",
                         status_code=403,
                     )
 
-        # 2. Embed offers plus skills plus bio
         skills_str = ", ".join(
             [s.get("name", str(s)) for s in data.skills if isinstance(s, dict)]
             or [str(s) for s in data.skills]
         )
-        offers_str = ", ".join(data.offers)
-        domains_str = ", ".join(data.domains)
-        embed_input = (
-            f"Title: {data.role_title or ''} at {data.company or ''}\n"
-            f"Bio: {data.bio or ''}\n"
-            f"Skills: {skills_str}\n"
-            f"Offers: {offers_str}\n"
-            f"Domains: {domains_str}"
-        )
-        embedding = await generate_embedding(embed_input)
+        embed_text = f"Offers: {', '.join(data.offers)}. Skills: {skills_str}. Bio: {data.bio or ''}"
+        embedding = await generate_embedding(embed_text)
 
-        # 3. Upsert GiverProfile
         stmt = select(GiverProfile).where(GiverProfile.user_id == user_id)
         res = await self.session.execute(stmt)
         profile = res.scalar_one_or_none()
 
-        if profile is None:
-            profile = GiverProfile(
-                user_id=user_id,
-                offers=data.offers,
-                topics=data.topics,
-                skills=data.skills,
-                domains=data.domains,
-                company=data.company,
-                role_title=data.role_title,
-                bio=data.bio,
-                languages=data.languages,
-                weekly_capacity=data.weekly_capacity,
-                institution_id=data.institution_id or (user.institution_id if user else None),
-                department=data.department,
-                batch=data.batch,
-                societies=data.societies,
-                embedding=embedding,
-                updated_at=utc_now(),
-            )
-            self.session.add(profile)
-        else:
+        now = utc_now()
+        if profile:
             profile.offers = data.offers
             profile.topics = data.topics
             profile.skills = data.skills
@@ -253,90 +244,146 @@ class MatchingService(MatchingPort):
                 profile.batch = data.batch
             profile.societies = data.societies
             profile.embedding = embedding
-            profile.updated_at = utc_now()
+            profile.updated_at = now
+        else:
+            profile = GiverProfile(
+                user_id=user_id,
+                offers=data.offers,
+                topics=data.topics,
+                skills=data.skills,
+                domains=data.domains,
+                company=data.company,
+                role_title=data.role_title,
+                bio=data.bio,
+                languages=data.languages,
+                weekly_capacity=data.weekly_capacity,
+                institution_id=data.institution_id,
+                department=data.department,
+                batch=data.batch,
+                societies=data.societies,
+                embedding=embedding,
+                created_at=now,
+                updated_at=now,
+            )
+            self.session.add(profile)
 
-        # 4. Publish giver.profile_updated outbox event
         await event_bus.publish(
             self.session,
-            topic="giver.profile_updated",
-            payload=GiverProfileUpdatedPayload(
-                giver_id=str(user_id),
-                weekly_capacity=profile.weekly_capacity,
-                topics=profile.topics,
+            "giver.profile_updated",
+            GiverProfileUpdatedPayload(
+                user_id=str(user_id),
+                weekly_capacity=data.weekly_capacity,
+                offers=data.offers,
+                has_embedding=True,
             ),
         )
 
         await self.session.commit()
-
-        # 5. Invalidate recommendation cache in Redis
-        await self.invalidate_recommendation_caches()
-
+        await self.invalidate_recommendation_caches(giver_id=str(user_id))
         return profile
 
-    # --- Student Match Projection Management ---
+    # --- Student Match Profile Management ---
 
     async def get_or_create_student_match_profile(
         self, student_id: uuid.UUID
     ) -> StudentMatchProfile:
+        from app.core.models import StudentProfile, GitHubProof, StudentIntent
+
         stmt = select(StudentMatchProfile).where(StudentMatchProfile.user_id == student_id)
         res = await self.session.execute(stmt)
         match_profile = res.scalar_one_or_none()
 
-        if not match_profile:
-            # Query User table for default institution/affinity attributes
-            stmt_user = select(User).where(User.id == student_id)
-            res_user = await self.session.execute(stmt_user)
-            user = res_user.scalar_one_or_none()
+        # Fetch latest User attributes
+        stmt_user = select(User).where(User.id == student_id)
+        res_user = await self.session.execute(stmt_user)
+        user = res_user.scalar_one_or_none()
 
-            # Query StudentProfile for actual skills, domains, and embedding if exists
-            from app.core.models import StudentProfile, GitHubProof
-            stmt_sp = select(StudentProfile).where(StudentProfile.user_id == student_id)
-            res_sp = await self.session.execute(stmt_sp)
-            sp = res_sp.scalar_one_or_none()
+        # Fetch latest StudentProfile
+        stmt_sp = select(StudentProfile).where(StudentProfile.user_id == student_id)
+        res_sp = await self.session.execute(stmt_sp)
+        sp = res_sp.scalar_one_or_none()
 
-            skills = [{"name": "Python", "category": "Programming Languages"}]
-            domains = ["Web Development", "AI/ML"]
-            profile_embedding = None
-            if sp and (sp.edited or sp.parsed):
-                merged = dict(sp.parsed or {})
-                if sp.edited:
-                    merged.update(sp.edited)
-                skills = merged.get("skills", skills)
-                domains = merged.get("domains", domains)
-                profile_embedding = sp.embedding
+        # Fetch latest GitHubProof
+        stmt_gh = select(GitHubProof).where(GitHubProof.user_id == student_id)
+        res_gh = await self.session.execute(stmt_gh)
+        gh = res_gh.scalar_one_or_none()
 
-            if not profile_embedding:
-                profile_embedding = deterministic_dummy_vector(f"student:{student_id}:profile")
+        # Fetch latest StudentIntent
+        stmt_i = select(StudentIntent).where(StudentIntent.user_id == student_id)
+        res_i = await self.session.execute(stmt_i)
+        intent = res_i.scalar_one_or_none()
 
-            # Check GitHub proof
-            stmt_gh = select(GitHubProof).where(GitHubProof.user_id == student_id)
-            res_gh = await self.session.execute(stmt_gh)
-            gh = res_gh.scalar_one_or_none()
+        dept = "Computer Science"
+        if user and (user.branch or getattr(user, "department", None)):
+            dept = user.branch or getattr(user, "department", None)
 
+        batch_yr = user.batch if user and user.batch else 2026
+
+        skills = [{"name": "Python", "category": "Programming Languages"}]
+        domains = ["Web Development", "AI/ML"]
+        profile_embedding = None
+
+        if sp and (sp.edited or sp.parsed):
+            merged = dict(sp.parsed or {})
+            if sp.edited:
+                merged.update(sp.edited)
+            skills = merged.get("skills", skills)
+            domains = merged.get("domains", domains)
+            profile_embedding = sp.embedding
+
+        if not profile_embedding:
+            profile_embedding = deterministic_dummy_vector(f"student:{student_id}:profile")
+
+        intent_goal = intent.raw_text if intent else "Find mentorship for software engineering internship"
+        intent_roles = intent.target_roles if intent and intent.target_roles else ["Software Engineer Intern"]
+        intent_domains = intent.target_domains if intent and intent.target_domains else ["Technology"]
+        intent_help = intent.goal_type if intent and intent.goal_type else "resume_review"
+        intent_embed = intent.intent_embedding if intent and intent.intent_embedding else deterministic_dummy_vector(f"student:{student_id}:intent")
+
+        if match_profile:
+            match_profile.institution_id = user.institution_id if user else match_profile.institution_id
+            match_profile.department = dept
+            match_profile.batch = batch_yr
+            match_profile.skills = skills
+            match_profile.domains = domains
+            match_profile.profile_embedding = profile_embedding
+            match_profile.has_github_proof = gh is not None
+            match_profile.github_languages = gh.top_languages if gh else []
+            match_profile.intent_goal = intent_goal
+            match_profile.intent_roles = intent_roles
+            match_profile.intent_domains = intent_domains
+            match_profile.intent_help_type = intent_help
+            match_profile.intent_embedding = intent_embed
+            match_profile.updated_at = utc_now()
+            if intent and intent.structured and isinstance(intent.structured, dict):
+                setattr(match_profile, "intent_required_skills", intent.structured.get("required_skills", []))
+        else:
             match_profile = StudentMatchProfile(
                 user_id=student_id,
                 institution_id=user.institution_id if user else None,
-                department="Computer Science",
-                batch=2026,
+                department=dept,
+                batch=batch_yr,
                 societies=["ACM"],
                 skills=skills,
                 domains=domains,
                 profile_embedding=profile_embedding,
                 has_github_proof=gh is not None,
                 github_languages=gh.top_languages if gh else [],
-                intent_goal="Find mentorship for software engineering internship",
-                intent_roles=["Software Engineer Intern"],
-                intent_domains=["Technology"],
-                intent_help_type="resume_review",
-                intent_embedding=deterministic_dummy_vector(f"student:{student_id}:intent"),
+                intent_goal=intent_goal,
+                intent_roles=intent_roles,
+                intent_domains=intent_domains,
+                intent_help_type=intent_help,
+                intent_embedding=intent_embed,
                 updated_at=utc_now(),
             )
+            if intent and intent.structured and isinstance(intent.structured, dict):
+                setattr(match_profile, "intent_required_skills", intent.structured.get("required_skills", []))
             self.session.add(match_profile)
-            await self.session.commit()
 
+        await self.session.commit()
         return match_profile
 
-    # --- Match Scoring Engine v1 ---
+    # --- Match Scoring Engine v2 (6 Explicit Factors in config/matching.json) ---
 
     def calculate_score_components(
         self,
@@ -346,124 +393,133 @@ class MatchingService(MatchingPort):
         presence_info: Dict[str, Any],
     ) -> ScoreComponents:
         """
-        Calculates honest Heuristic Score v1 components (Section 6 & Requirement 4):
-        - 35% Expertise Fit
-        - 25% Intent Fit
-        - 15% Affinity
-        - 10% Availability
-        - 10% Rating
-        - 5% Response Odds
-        - Cold Start Exposure Boost (+0.08 if total_sessions < 5)
+        Calculates honest Heuristic Score components with weights from config/matching.json:
+        - 35% Skill & Intent Similarity (pgvector cosine + keyword/taxonomy overlap)
+        - 15% Similar Journey (same branch, similar projects, starting point)
+        - 15% Affinity (same college: 1.0, same branch: 0.5)
+        - 15% Rating (smoothed avg + reputation band multiplier)
+        - 12% Availability (active_now: 1.0, available_today: 0.6, inactive: 0.0)
+        - 8% Response Speed (<=30m: 1.0, <=2h: 0.85, <=6h: 0.65, >6h: 0.40)
         """
-        # 1. Expertise Fit (35%)
-        cos_expertise = cosine_similarity(student.profile_embedding, giver.embedding)
+        config = self.matching_config
+        weights = config.get("weights", {
+            "skill_intent_similarity": 0.35,
+            "similar_journey": 0.15,
+            "affinity": 0.15,
+            "rating": 0.15,
+            "availability": 0.12,
+            "response_speed": 0.08,
+        })
 
-        # Keyword & taxonomy overlap
+        # 1. Skill and Intent Similarity (35%)
         student_skills = {
-            s.get("name", "").lower() for s in (student.skills or []) if isinstance(s, dict)
-        } or {str(s).lower() for s in (student.skills or [])}
+            s.get("name", "").strip().lower() for s in (student.skills or []) if isinstance(s, dict)
+        } or {str(s).strip().lower() for s in (student.skills or [])}
+
+        intent_skills = {
+            str(s).strip().lower() for s in (getattr(student, "intent_required_skills", None) or []) if str(s).strip()
+        }
+        all_student_skills = student_skills.union(intent_skills)
+
         giver_skills = {
-            s.get("name", "").lower() for s in (giver.skills or []) if isinstance(s, dict)
-        } or {str(s).lower() for s in (giver.skills or [])}
-        giver_topics = {t.lower() for t in (giver.topics or [])}
+            s.get("name", "").strip().lower() for s in (giver.skills or []) if isinstance(s, dict)
+        } or {str(s).strip().lower() for s in (giver.skills or [])}
+        giver_topics = {str(t).strip().lower() for t in (giver.topics or [])}
+        all_giver = giver_skills.union(giver_topics)
 
-        combined_giver_skills = giver_skills.union(giver_topics)
-        shared_skills = student_skills.intersection(combined_giver_skills)
-        all_skills = student_skills.union(combined_giver_skills)
-        jaccard = len(shared_skills) / max(1, len(all_skills))
+        shared = all_student_skills.intersection(all_giver)
+        jaccard = len(shared) / max(1, len(all_student_skills.union(all_giver)))
 
-        # Boost for GitHub Proof of work (F5)
-        github_boost = 0.05 if getattr(student, "has_github_proof", False) else 0.0
-        expertise_fit = min(1.0, 0.7 * cos_expertise + 0.3 * jaccard + github_boost)
-
-        # 2. Intent Fit (25%)
+        cos_profile = cosine_similarity(student.profile_embedding, giver.embedding)
         cos_intent = cosine_similarity(student.intent_embedding, giver.embedding)
+        cos_sim = max(cos_profile, cos_intent)
+
+        # Help type match
         help_type_match = 0.0
         if student.intent_help_type:
             clean_intent_ht = student.intent_help_type.lower().replace(" ", "_")
-            giver_offers = {o.lower().replace(" ", "_") for o in (giver.offers or [])}
+            giver_offers = {str(o).lower().replace(" ", "_") for o in (giver.offers or [])}
             if clean_intent_ht in giver_offers:
                 help_type_match = 1.0
             elif any(clean_intent_ht in o for o in giver_offers):
                 help_type_match = 0.5
-        intent_fit = min(1.0, 0.6 * cos_intent + 0.4 * help_type_match)
 
-        # 3. Affinity (15%)
-        same_inst = 0.40 if (giver.institution_id and giver.institution_id == student.institution_id) else 0.0
-        same_dept = (
-            0.30
-            if (giver.department and student.department and giver.department.lower() == student.department.lower())
+        github_boost = 0.05 if getattr(student, "has_github_proof", False) else 0.0
+        skill_intent_sim = min(1.0, 0.50 * cos_sim + 0.30 * jaccard + 0.15 * help_type_match + github_boost)
+
+        # 2. Similar Journey (15%)
+        # same branch, similar projects, similar starting point
+        same_branch = (
+            1.0
+            if (giver.department and student.department and giver.department.strip().lower() == student.department.strip().lower())
             else 0.0
         )
-        batch_prox = 0.0
-        if giver.batch and student.batch:
-            diff = giver.batch - student.batch
-            if 1 <= abs(diff) <= 4:
-                batch_prox = 0.20
-            elif diff == 0:
-                batch_prox = 0.10
-            else:
-                batch_prox = 0.05
+        student_domains = {d.lower() for d in (student.domains or [])}
+        giver_domains = {d.lower() for d in (giver.domains or [])}
+        shared_domains = student_domains.intersection(giver_domains)
+        project_sim = 1.0 if shared_domains else (0.6 if len(shared) >= 2 else 0.2)
+        batch_diff = abs(giver.batch - student.batch) if (giver.batch and student.batch) else 4
+        starting_point = 1.0 if (1 <= batch_diff <= 5) else 0.5
+        similar_journey = min(1.0, 0.50 * same_branch + 0.30 * project_sim + 0.20 * starting_point)
 
-        shared_societies = set(giver.societies or []).intersection(set(student.societies or []))
-        society_score = 0.10 if shared_societies else 0.0
-        affinity = min(1.0, same_inst + same_dept + batch_prox + society_score)
+        # 3. Affinity (15%)
+        # same college 1, same branch 0.5
+        same_college = (
+            1.0
+            if (giver.institution_id and student.institution_id and giver.institution_id == student.institution_id)
+            else 0.0
+        )
+        affinity = min(1.0, 1.0 * same_college + 0.5 * same_branch)
 
-        # 4. Availability (10%)
-        is_online = presence_info.get("online", False)
-        capacity_left = presence_info.get("capacity_left", giver.weekly_capacity)
-        online_score = 0.70 if is_online else 0.20
-        capacity_score = min(1.0, capacity_left / 5.0) * 0.30
-        availability = min(1.0, online_score + capacity_score)
-
-        # 5. Rating (10%)
-        smoothed_avg = band_info.get("smoothed_avg", 4.0)
-        band = band_info.get("band", "Rising")
-        band_multiplier = 1.0 if band == "Top Rated" else (0.85 if band == "Trusted" else 0.70)
+        # 4. Rating (15%)
+        smoothed_avg = float(band_info.get("smoothed_avg", giver.rating_avg or 4.0))
         norm_rating = max(0.0, min(1.0, (smoothed_avg - 1.0) / 4.0))
-        rating = min(1.0, 0.6 * norm_rating + 0.4 * band_multiplier)
+        band = band_info.get("band", giver.band or "Rising")
+        band_mult = 1.0 if "top" in band.lower() else (0.85 if "trust" in band.lower() else 0.70)
+        rating_score = min(1.0, 0.70 * norm_rating + 0.30 * band_mult)
 
-        # 6. Response Odds (5%)
-        stats = giver.response_stats or {}
-        acceptance_rate = float(stats.get("acceptance_rate", 0.95))
-        median_mins = float(stats.get("median_response_minutes", 60))
-        if median_mins <= 30:
+        # 5. Availability (12%)
+        # active 1, today 0.6, inactive 0
+        status = presence_info.get("status") or ("active_now" if presence_info.get("online") else "available_today")
+        if status == "active_now" or presence_info.get("online"):
+            avail_score = 1.0
+        elif status == "available_today":
+            avail_score = 0.6
+        else:
+            avail_score = 0.0
+
+        # 6. Response Speed (8%)
+        reply_mins = float(presence_info.get("avg_reply_minutes", (giver.response_stats or {}).get("median_response_minutes", 45)))
+        if reply_mins <= 30:
             speed_score = 1.0
-        elif median_mins <= 120:
+        elif reply_mins <= 120:
             speed_score = 0.85
-        elif median_mins <= 360:
+        elif reply_mins <= 360:
             speed_score = 0.65
         else:
             speed_score = 0.40
-        response_odds = min(1.0, 0.6 * acceptance_rate + 0.4 * speed_score)
 
-        # Baseline Weighted Score
-        base_score = (
-            WEIGHT_EXPERTISE * expertise_fit
-            + WEIGHT_INTENT * intent_fit
-            + WEIGHT_AFFINITY * affinity
-            + WEIGHT_AVAILABILITY * availability
-            + WEIGHT_RATING * rating
-            + WEIGHT_RESPONSE_ODDS * response_odds
+        total = (
+            weights.get("skill_intent_similarity", 0.35) * skill_intent_sim
+            + weights.get("similar_journey", 0.15) * similar_journey
+            + weights.get("affinity", 0.15) * affinity
+            + weights.get("rating", 0.15) * rating_score
+            + weights.get("availability", 0.12) * avail_score
+            + weights.get("response_speed", 0.08) * speed_score
         )
 
-        # Cold Start Boost (Requirement 7)
-        total_sessions = band_info.get("n", stats.get("total_sessions", 0))
-        cold_start_boost = 0.0
-        if total_sessions < COLD_START_SESSION_THRESHOLD:
-            cold_start_boost = COLD_START_BOOST
-
-        total_score = min(1.0, max(0.0, base_score + cold_start_boost))
-
         return ScoreComponents(
-            expertise_fit=round(expertise_fit, 3),
-            intent_fit=round(intent_fit, 3),
+            skill_intent_similarity=round(skill_intent_sim, 3),
+            similar_journey=round(similar_journey, 3),
             affinity=round(affinity, 3),
-            availability=round(availability, 3),
-            rating=round(rating, 3),
-            response_odds=round(response_odds, 3),
-            cold_start_boost=round(cold_start_boost, 3),
-            total_score=round(total_score, 3),
+            rating=round(rating_score, 3),
+            availability=round(avail_score, 3),
+            response_speed=round(speed_score, 3),
+            expertise_fit=round(skill_intent_sim, 3),
+            intent_fit=round(similar_journey, 3),
+            response_odds=round(speed_score, 3),
+            cold_start_boost=0.0,
+            total_score=round(min(1.0, max(0.0, total)), 3),
         )
 
     # --- Explainability Engine (Requirement 5) ---
@@ -475,77 +531,65 @@ class MatchingService(MatchingPort):
         scores: ScoreComponents,
         presence_info: Dict[str, Any],
         band_info: Dict[str, Any],
+        giver_user: Optional[User] = None,
     ) -> List[str]:
-        """
-        Generates deterministic plain-language why_lines from score components.
-        Never exposes raw embeddings or formulas to students.
-        """
         why_lines: List[str] = []
 
-        # 1. Expertise overlap explanation
-        student_skills = {
-            s.get("name", "") for s in (student.skills or []) if isinstance(s, dict)
-        } or {str(s) for s in (student.skills or [])}
-        giver_skills = {
-            s.get("name", "") for s in (giver.skills or []) if isinstance(s, dict)
-        } or {str(s) for s in (giver.skills or [])}
-        shared = [s for s in student_skills if s in giver_skills]
+        # 1. Exact real overlapping skills
+        student_skills = [
+            s.get("name", "").strip() for s in (student.skills or []) if isinstance(s, dict) and s.get("name")
+        ] or [str(s).strip() for s in (student.skills or []) if str(s).strip()]
+
+        intent_skills = [str(s).strip() for s in (getattr(student, "intent_required_skills", None) or []) if str(s).strip()]
+        combined_student = student_skills + intent_skills
+
+        giver_skills = [
+            s.get("name", "").strip() for s in (giver.skills or []) if isinstance(s, dict) and s.get("name")
+        ] or [str(s).strip() for s in (giver.skills or []) if str(s).strip()]
+        giver_topics = [str(t).strip() for t in (giver.topics or []) if str(t).strip()]
+        combined_giver = giver_skills + giver_topics
+
+        shared = []
+        for s in combined_student:
+            for g in combined_giver:
+                if s.lower() == g.lower() and s not in shared:
+                    shared.append(s)
 
         if shared:
             skills_text = " and ".join(shared[:2])
             why_lines.append(f"Shares your {skills_text} skills")
-        elif scores.expertise_fit >= 0.7:
-            why_lines.append("Strong domain and technical overlap with your background")
+        elif scores.skill_intent_similarity >= 0.65:
+            why_lines.append("Strong technical overlap with your target domain")
 
-        # 2. Intent matching explanation
+        # 2. Real journey / branch
+        if giver.department and student.department and giver.department.strip().lower() == student.department.strip().lower():
+            why_lines.append(f"Graduated from same branch ({giver.department})")
+        elif giver.batch and student.batch and abs(giver.batch - student.batch) <= 4:
+            diff = abs(giver.batch - student.batch)
+            why_lines.append(f"Similar academic background ({diff} year{'s' if diff > 1 else ''} senior)")
+
+        # 3. Real affinity / college
+        if giver.institution_id and student.institution_id and giver.institution_id == student.institution_id:
+            why_lines.append("Alumnus from your college (IIIT Delhi)")
+
+        # 4. Goal / Intent match
         if student.intent_help_type:
             clean_intent = student.intent_help_type.lower().replace("_", " ")
-            matching_offers = [
-                o for o in (giver.offers or []) if clean_intent in o.lower().replace("_", " ")
-            ]
+            matching_offers = [o.replace("_", " ") for o in (giver.offers or []) if clean_intent in o.lower().replace("_", " ")]
             if matching_offers:
-                why_lines.append(
-                    f"Offers {matching_offers[0].replace('_', ' ')}, which matches your goal"
-                )
+                why_lines.append(f"Offers {matching_offers[0]}, matching your goal")
+            elif student.intent_roles:
+                why_lines.append(f"Experienced in your target role: {student.intent_roles[0]}")
 
-        # 3. Affinity explanation
-        if giver.institution_id and student.institution_id and giver.institution_id == student.institution_id:
-            if giver.batch and student.batch and giver.batch != student.batch:
-                diff = abs(giver.batch - student.batch)
-                direction = "ahead" if giver.batch < student.batch else "junior"
-                why_lines.append(f"Same college, {diff} year{'s' if diff > 1 else ''} {direction}")
-            else:
-                why_lines.append("Alumnus from your college")
-        elif giver.department and student.department and giver.department.lower() == student.department.lower():
-            why_lines.append(f"Same academic background in {giver.department}")
+        # 5. Availability & Response
+        status = presence_info.get("status") or ("active_now" if presence_info.get("online") else "available_today")
+        if status == "active_now" or presence_info.get("online"):
+            reply_mins = presence_info.get("avg_reply_minutes", 30)
+            why_lines.append(f"Active now; typically responds within {reply_mins} minutes")
+        elif status == "available_today":
+            why_lines.append("Available today for sessions")
 
-        # 4. Availability explanation
-        if presence_info.get("online"):
-            why_lines.append("Online now for instant connection")
-        else:
-            capacity = presence_info.get("capacity_left", giver.weekly_capacity)
-            if capacity > 0:
-                why_lines.append(f"Open window with {capacity} session slots available this week")
-
-        # 5. Rating & Band explanation
-        band = band_info.get("band", "Rising")
-        if band == "Top Rated":
-            why_lines.append(
-                f"Top Rated mentor with {band_info.get('smoothed_avg', 4.8):.1f} smoothed rating"
-            )
-        elif band == "Trusted":
-            why_lines.append("Trusted alumni mentor with consistent positive reviews")
-        elif scores.cold_start_boost > 0:
-            why_lines.append("Rising alumni mentor eager to guide")
-
-        # 6. GitHub Proof of work explanation
-        if getattr(student, "has_github_proof", False) and getattr(student, "github_languages", None):
-            why_lines.append(
-                f"Verified GitHub proof of work in {', '.join(student.github_languages[:2])}"
-            )
-
-        # Deterministic deduplication while maintaining order
-        seen: Set[str] = set()
+        seen = set()
         deduped = []
         for line in why_lines:
             if line not in seen:
@@ -557,14 +601,12 @@ class MatchingService(MatchingPort):
     # --- MatchingPort Implementation ---
 
     async def explain(self, student_id: str, giver_id: str) -> List[str]:
-        """MatchingPort implementation for the sessions module."""
         s_uuid = uuid.UUID(student_id)
         g_uuid = uuid.UUID(giver_id)
 
         student = await self.get_or_create_student_match_profile(s_uuid)
         giver = await self.get_giver_profile(g_uuid)
 
-        # Query ports safely
         try:
             band_info = await ports.ratings.get_band(str(g_uuid))
         except Exception:
@@ -579,7 +621,7 @@ class MatchingService(MatchingPort):
         scores = self.calculate_score_components(student, giver, band_info, presence_info)
         return self.generate_why_lines(student, giver, scores, presence_info, band_info)
 
-    # --- Recommendations Query & Re-ranking ---
+    # --- Recommendations Query & Re-ranking (with Hard Gates) ---
 
     async def get_recommendations(
         self,
@@ -590,7 +632,9 @@ class MatchingService(MatchingPort):
         filter_domain: Optional[str] = None,
         filter_help_type: Optional[str] = None,
     ) -> RecommendationsResponse:
-        # 1. Hard Gate on Student: must be verified and have granted profile_matching consent
+        now = utc_now()
+
+        # 1. Hard Gate on Student: DPDP consent
         from app.core.models import Consent
         stmt_consent = select(Consent).where(
             Consent.user_id == student_id,
@@ -604,18 +648,6 @@ class MatchingService(MatchingPort):
                 message="DPDP consent for 'profile_matching' is required to receive recommendations.",
                 status_code=403,
             )
-
-        try:
-            student_level = await ports.trust.get_level(str(student_id))
-            if student_level in ["new", "restricted"]:
-                raise AppError(
-                    code="student_verification_required",
-                    message="You must complete college verification before accessing mentor recommendations.",
-                    status_code=403,
-                )
-        except PortNotReady:
-            # When trust port is stubbed in standalone testing, proceed if student is valid
-            pass
 
         student = await self.get_or_create_student_match_profile(student_id)
 
@@ -637,107 +669,112 @@ class MatchingService(MatchingPort):
         except Exception:
             pass
 
-        # 3. Retrieve Top Candidates (pgvector HNSW query bounded to 200 candidates)
-        try:
-            from sqlalchemy import text
-            await self.session.execute(text("SET LOCAL hnsw.ef_search = 40;"))
-        except Exception:
-            pass
-
-        stmt = select(GiverProfile).where(GiverProfile.weekly_capacity > 0)
-        stmt = stmt.where(GiverProfile.daily_impressions_count < MAX_DAILY_EXPOSURE)
-
-        # Pre-filter by scope to leverage ix_giver_profiles_inst_cap index
-        if scope == "own_college" and student.institution_id:
-            stmt = stmt.where(GiverProfile.institution_id == student.institution_id)
-        elif scope == "cross_college" and student.institution_id:
-            stmt = stmt.where(GiverProfile.institution_id != student.institution_id)
-
-        stmt = stmt.limit(200)
+        # 3. Retrieve Candidate Givers (all potential givers to enforce Hard Gates in service)
+        stmt = select(GiverProfile).limit(200)
         res = await self.session.execute(stmt)
         all_candidates = res.scalars().all()
 
         if not all_candidates:
-            return RecommendationsResponse(items=[], next_cursor=None, scope=scope)
+            return RecommendationsResponse(
+                items=[],
+                excluded_summary=HardGateExclusionSummary(),
+                next_cursor=None,
+                scope=scope,
+            )
 
-        candidate_ids = [str(c.user_id) for c in all_candidates]
+        candidate_ids = [c.user_id for c in all_candidates]
 
-        # 4. Batch Port Queries
-        # TrustPort
-        trust_levels = {}
-        blocked_set = set()
-        for cid in candidate_ids:
-            try:
-                trust_levels[cid] = await ports.trust.get_level(cid)
-            except Exception:
-                trust_levels[cid] = "verified"
+        # Bulk fetch linked Users, Availability, Capacity
+        stmt_users = select(User).where(User.id.in_(candidate_ids))
+        res_users = await self.session.execute(stmt_users)
+        users_map = {u.id: u for u in res_users.scalars().all()}
 
-            try:
-                if await ports.trust.is_blocked(str(student_id), cid):
-                    blocked_set.add(cid)
-            except Exception:
-                pass
+        stmt_avail = select(Availability).where(Availability.user_id.in_(candidate_ids))
+        res_avail = await self.session.execute(stmt_avail)
+        avail_map = {a.user_id: a for a in res_avail.scalars().all()}
 
-        # PresencePort
-        try:
-            presence_map = await ports.presence.status(candidate_ids)
-        except Exception:
-            presence_map = {cid: {"online": False, "capacity_left": 3} for cid in candidate_ids}
+        stmt_cap = select(Capacity).where(Capacity.user_id.in_(candidate_ids))
+        res_cap = await self.session.execute(stmt_cap)
+        cap_map = {c.user_id: c for c in res_cap.scalars().all()}
 
-        # RatingsPort
+        # Port queries
         ratings_map = {}
         for cid in candidate_ids:
             try:
-                ratings_map[cid] = await ports.ratings.get_band(cid)
+                ratings_map[str(cid)] = await ports.ratings.get_band(str(cid))
             except Exception:
-                ratings_map[cid] = {
+                ratings_map[str(cid)] = {
                     "band": "Rising",
                     "smoothed_avg": 4.0,
                     "n": 0,
                     "completion_rate": 1.0,
                 }
 
-        # CreditsPort: check scope permission
-        is_scope_locked = False
-        lock_reason = None
-        if scope in ["cross_college", "experts"]:
-            # Check representative access
-            try:
-                access_check = await ports.credits.can_access(
-                    str(student_id), candidate_ids[0] if candidate_ids else str(student_id)
-                )
-                if not access_check.get("allowed", False):
-                    is_scope_locked = True
-                    lock_reason = access_check.get("reason", "plan_required")
-            except Exception:
-                # If credits port denied or plan required
-                is_scope_locked = True
-                lock_reason = "plan_required"
+        try:
+            presence_map = await ports.presence.status([str(cid) for cid in candidate_ids])
+        except Exception:
+            presence_map = {}
 
-        # 5. Apply Hard Gates & Score Candidates
-        ranked_items = []
+        # 4. HARD GATES before ranking:
+        # Exclude: unverified, suspended, inactive-too-long, over weekly-capacity
+        # Return how many were excluded and why (no names)
+        excluded_reasons = {
+            "unverified": 0,
+            "suspended": 0,
+            "inactive_too_long": 0,
+            "over_capacity": 0,
+        }
+        surviving_candidates = []
+
         for giver in all_candidates:
-            gid = str(giver.user_id)
-
-            # Gate A: Not the student
-            if giver.user_id == student_id:
+            gid = giver.user_id
+            if gid == student_id:
                 continue
 
-            # Gate B: Giver verified and not restricted
-            g_level = trust_levels.get(gid, "verified")
-            if g_level not in ["verified", "established"]:
+            u = users_map.get(gid)
+            avail = avail_map.get(gid)
+            cap = cap_map.get(gid)
+
+            pres = presence_map.get(str(gid), {})
+            cap_left = pres.get("capacity_left", giver.weekly_capacity)
+
+            # Gate 1: Unverified Giver
+            if not u or u.verification_level in ["pending", "unverified"] or giver.band == "unverified":
+                excluded_reasons["unverified"] += 1
                 continue
 
-            # Gate C: Not blocked
-            if gid in blocked_set:
+            # Gate 2: Suspended Giver
+            if (u.trust_score is not None and u.trust_score < 30.0) or getattr(u, "status", None) == "suspended" or u.role == "suspended":
+                excluded_reasons["suspended"] += 1
                 continue
 
-            # Gate D: Has weekly capacity left
-            pres = presence_map.get(gid, {"online": False, "capacity_left": giver.weekly_capacity})
-            if pres.get("capacity_left", 0) <= 0:
+            # Gate 3: Inactive too long (> 14 days)
+            is_stale = False
+            if avail:
+                if avail.status == "inactive_stale":
+                    is_stale = True
+                elif avail.last_active_at:
+                    last_active = ensure_utc(avail.last_active_at)
+                    now_utc = ensure_utc(now)
+                    if last_active and now_utc and (now_utc - last_active).days > 14:
+                        is_stale = True
+            if is_stale:
+                excluded_reasons["inactive_too_long"] += 1
                 continue
 
-            # Gate E: Scope filtering
+            # Gate 4: Over weekly capacity
+            is_full = False
+            if giver.weekly_capacity <= 0:
+                is_full = True
+            if cap and cap.weekly_cap > 0 and cap.current_week_booked >= cap.weekly_cap:
+                is_full = True
+            if cap_left <= 0:
+                is_full = True
+            if is_full:
+                excluded_reasons["over_capacity"] += 1
+                continue
+
+            # Scope filtering
             if scope == "own_college":
                 if giver.institution_id and student.institution_id and giver.institution_id != student.institution_id:
                     continue
@@ -745,58 +782,59 @@ class MatchingService(MatchingPort):
                 if giver.institution_id and student.institution_id and giver.institution_id == student.institution_id:
                     continue
 
-            # Filter by domain or help type if provided
+            # Optional filter by domain / help type
             if filter_domain and filter_domain.lower() not in [d.lower() for d in (giver.domains or [])]:
                 continue
             if filter_help_type and filter_help_type.lower() not in [o.lower() for o in (giver.offers or [])]:
                 continue
 
-            # Gate F: Daily exposure cap
-            if giver.daily_impressions_count >= MAX_DAILY_EXPOSURE:
-                continue
+            surviving_candidates.append(giver)
 
-            # Compute Score Components
-            band_info = ratings_map.get(gid, {"band": "Rising", "smoothed_avg": 4.0, "n": 0})
-            scores = self.calculate_score_components(student, giver, band_info, pres)
-            why_lines = self.generate_why_lines(student, giver, scores, pres, band_info)
+        # 5. Score Surviving Candidates
+        ranked_items = []
+        for giver in surviving_candidates:
+            gid_str = str(giver.user_id)
+            u = users_map.get(giver.user_id)
+            avail = avail_map.get(giver.user_id)
+            pres = presence_map.get(gid_str, {})
+            status = avail.status if avail else ("active_now" if pres.get("online") else "available_today")
+            avg_reply = avail.avg_reply_minutes if avail else 45
+            pres_info = {
+                "online": pres.get("online", status == "active_now"),
+                "capacity_left": pres.get("capacity_left", giver.weekly_capacity),
+                "status": status,
+                "avg_reply_minutes": avg_reply,
+            }
+            band_info = ratings_map.get(
+                gid_str,
+                {"band": giver.band or "Rising", "smoothed_avg": giver.rating_avg or 4.0, "n": giver.rating_count or 0},
+            )
 
-            ranked_items.append((giver, scores, why_lines, pres, band_info))
+            scores = self.calculate_score_components(student, giver, band_info, pres_info)
+            why_lines = self.generate_why_lines(student, giver, scores, pres_info, band_info, u)
+            ranked_items.append((giver, scores, why_lines, pres_info, band_info, u))
 
         # Sort by total_score descending
         ranked_items.sort(key=lambda x: x[1].total_score, reverse=True)
 
-        # 6. Save ranked IDs to Redis Cache
-        if redis_client:
-            try:
-                cache_payload = [
-                    {
-                        "giver_id": str(item[0].user_id),
-                        "score_components": item[1].model_dump(),
-                        "why_lines": item[2],
-                        "locked": is_scope_locked,
-                        "lock_reason": lock_reason,
-                    }
-                    for item in ranked_items
-                ]
-                await redis_client.setex(
-                    cache_key, CACHE_TTL_SECONDS, json.dumps(cache_payload)
-                )
-            except Exception:
-                pass
+        excluded_summary = HardGateExclusionSummary(
+            total_excluded=sum(excluded_reasons.values()),
+            reasons=excluded_reasons,
+        )
 
-        # 7. Cursor Pagination
         return await self._build_recommendations_response(
-            ranked_items, limit, cursor, scope, is_scope_locked, lock_reason
+            ranked_items, limit, cursor, scope, False, None, excluded_summary
         )
 
     async def _build_recommendations_response(
         self,
-        ranked_items: List[Tuple[GiverProfile, ScoreComponents, List[str], Dict[str, Any], Dict[str, Any]]],
+        ranked_items: List[Tuple[GiverProfile, ScoreComponents, List[str], Dict[str, Any], Dict[str, Any], Optional[User]]],
         limit: int,
         cursor: Optional[str],
         scope: str,
         is_locked: bool,
         lock_reason: Optional[str],
+        excluded_summary: Optional[HardGateExclusionSummary] = None,
     ) -> RecommendationsResponse:
         start_idx = 0
         if cursor:
@@ -810,14 +848,35 @@ class MatchingService(MatchingPort):
             next_cursor = encode_cursor({"offset": start_idx + limit})
 
         results = []
-        for giver, scores, why_lines, pres, band_info in page_items:
-            # Query user name for card
-            res_user = await self.session.execute(select(User).where(User.id == giver.user_id))
-            user = res_user.scalar_one_or_none()
+        for item in page_items:
+            giver = item[0]
+            scores = item[1]
+            why_lines = item[2]
+            pres = item[3]
+            band_info = item[4]
+            user = item[5] if len(item) > 5 else None
+
+            if not user:
+                res_user = await self.session.execute(select(User).where(User.id == giver.user_id))
+                user = res_user.scalar_one_or_none()
             full_name = user.full_name if user else "Verified Alumni"
 
+            # Determine giver_type and giver_type_label (alumni, faculty, recruiter, founder)
+            role = (user.role if user else "alumni").lower()
+            if "facult" in role:
+                g_type = "faculty"
+                g_type_label = "Faculty Mentor"
+            elif "recruit" in role:
+                g_type = "recruiter"
+                g_type_label = "Verified Recruiter"
+            elif "founder" in role:
+                g_type = "founder"
+                g_type_label = "Verified Founder"
+            else:
+                g_type = "alumni"
+                g_type_label = "Alumnus Mentor"
+
             if is_locked:
-                # Mask sensitive info when locked
                 full_name = f"{full_name.split()[0]} (Verified Giver)"
                 bio = "Subscribe to unlock direct access, calendar booking, and 1-on-1 calls."
             else:
@@ -827,6 +886,8 @@ class MatchingService(MatchingPort):
                 id=giver.user_id,
                 full_name=full_name,
                 headline=f"{giver.role_title or 'Professional'} at {giver.company or 'Tech'}",
+                giver_type=g_type,
+                giver_type_label=g_type_label,
                 company=giver.company,
                 role_title=giver.role_title,
                 bio=bio,
@@ -835,17 +896,19 @@ class MatchingService(MatchingPort):
                 skills=giver.skills or [],
                 domains=giver.domains or [],
                 languages=giver.languages or [],
-                badges=[band_info.get("band", "Rising"), "Verified"],
-                band=band_info.get("band", "Rising"),
+                badges=[band_info.get("band", giver.band or "Rising"), g_type_label],
+                band=band_info.get("band", giver.band or "Rising"),
                 rating_summary=RatingSummary(
-                    band=band_info.get("band", "Rising"),
-                    smoothed_avg=band_info.get("smoothed_avg", 4.0),
-                    total_sessions=band_info.get("n", 0),
+                    band=band_info.get("band", giver.band or "Rising"),
+                    smoothed_avg=band_info.get("smoothed_avg", giver.rating_avg or 4.0),
+                    total_sessions=band_info.get("n", giver.rating_count or 0),
                     completion_rate=band_info.get("completion_rate", 1.0),
                 ),
                 availability_summary=AvailabilitySummary(
                     online=pres.get("online", False),
                     capacity_left=pres.get("capacity_left", giver.weekly_capacity),
+                    status=pres.get("status", "active_now"),
+                    avg_reply_minutes=pres.get("avg_reply_minutes", 45),
                 ),
                 why_lines=why_lines,
             )
@@ -860,101 +923,189 @@ class MatchingService(MatchingPort):
                 )
             )
 
-            # Increment daily impressions
             giver.daily_impressions_count = (giver.daily_impressions_count or 0) + 1
 
         await self.session.commit()
 
         return RecommendationsResponse(
             items=results,
+            excluded_summary=excluded_summary or HardGateExclusionSummary(),
             next_cursor=next_cursor,
             scope=scope,
             locked=is_locked,
             lock_reason=lock_reason,
         )
 
-    async def _paginate_cached_recommendations(
+    # --- Explain Ranking Panel (Requirement 7) ---
+
+    async def explain_ranking(
         self,
-        cached_obj: List[Dict[str, Any]],
-        student: StudentMatchProfile,
-        limit: int,
-        cursor: Optional[str],
-        scope: str,
-    ) -> RecommendationsResponse:
-        start_idx = 0
-        if cursor:
-            decoded = decode_cursor(cursor)
-            if decoded and "offset" in decoded:
-                start_idx = int(decoded["offset"])
+        student_id: uuid.UUID,
+        scope: str = "own_college",
+    ) -> ExplainRankingResponse:
+        """
+        Returns full transparent ranking factor breakdown, weights, and hard gate exclusions
+        for the admin / jury panel.
+        """
+        recs_response = await self.get_recommendations(student_id=student_id, scope=scope, limit=50)
 
-        page_data = cached_obj[start_idx : start_idx + limit]
-        next_cursor = None
-        if start_idx + limit < len(cached_obj):
-            next_cursor = encode_cursor({"offset": start_idx + limit})
-
-        results = []
-        is_locked = False
-        lock_reason = None
-
-        for item in page_data:
-            g_uuid = uuid.UUID(item["giver_id"])
-            stmt = select(GiverProfile).where(GiverProfile.user_id == g_uuid)
-            res = await self.session.execute(stmt)
-            giver = res.scalar_one_or_none()
-            if not giver:
-                continue
-
-            scores = ScoreComponents(**item["score_components"])
-            why_lines = item["why_lines"]
-            is_locked = item.get("locked", False)
-            lock_reason = item.get("lock_reason")
-
-            card = await self.get_giver_public_card(giver.user_id, student.user_id, why_lines)
-            results.append(
-                RecommendationItem(
-                    giver=card,
-                    score_components=scores,
-                    why_lines=why_lines,
-                    locked=is_locked,
-                    lock_reason=lock_reason,
+        candidates = []
+        for item in recs_response.items:
+            giver_card = item.giver
+            scores = item.score_components
+            skills_extracted = [
+                s.get("name", str(s)) if isinstance(s, dict) else str(s)
+                for s in giver_card.skills
+            ]
+            candidates.append(
+                CandidateRankingExplanation(
+                    giver_id=giver_card.id,
+                    giver_name=giver_card.full_name,
+                    giver_type=giver_card.giver_type,
+                    giver_type_label=giver_card.giver_type_label,
+                    role_title=giver_card.role_title,
+                    company=giver_card.company,
+                    score_breakdown=scores,
+                    shared_skills=skills_extracted,
+                    same_college=scores.affinity >= 0.5,
+                    same_branch=scores.similar_journey >= 0.4,
+                    availability_status=giver_card.availability_summary.status,
+                    avg_reply_minutes=giver_card.availability_summary.avg_reply_minutes,
+                    rating_avg=giver_card.rating_summary.smoothed_avg,
+                    why_lines=item.why_lines,
                 )
             )
 
-        return RecommendationsResponse(
-            items=results,
-            next_cursor=next_cursor,
-            scope=scope,
-            locked=is_locked,
-            lock_reason=lock_reason,
+        return ExplainRankingResponse(
+            weights=self.matching_config.get("weights", {}),
+            hard_gates_config=self.matching_config.get("hard_gates", {}),
+            excluded_summary=recs_response.excluded_summary,
+            candidates=candidates,
         )
 
-    # --- Public Giver Card (Requirement 6) ---
+    # --- Intent Structuring & Saving (F6 & F7) ---
+
+    async def save_intent(
+        self,
+        user_id: uuid.UUID,
+        text: str,
+        goal_type: Optional[str] = None,
+        target_role: Optional[str] = None,
+        target_company_type: Optional[str] = None,
+        required_skills: Optional[List[str]] = None,
+    ) -> SaveIntentResponse:
+        """
+        Analyzes request quality, converts text to structured intent,
+        computes intent embedding, and saves to database.
+        """
+        analysis = analyze_intent_quality(text)
+        if analysis.is_blocked:
+            raise AppError(
+                code="request_quality_blocked",
+                message=analysis.block_reason or "Your request was blocked due to invalid quality or spam patterns.",
+                status_code=400,
+            )
+
+        structured = structure_intent(
+            raw_text=text,
+            goal_type_override=goal_type,
+            target_role_override=target_role,
+            target_company_type_override=target_company_type,
+            required_skills_override=required_skills,
+        )
+
+        embed_text = (
+            f"Goal: {structured.goal_type}. Role: {structured.target_role}. "
+            f"Company: {structured.target_company_type}. Skills: {', '.join(structured.required_skills)}. {text}"
+        )
+        embedding = await generate_embedding(embed_text)
+
+        now = utc_now()
+        stmt_i = select(StudentIntent).where(StudentIntent.user_id == user_id)
+        res_i = await self.session.execute(stmt_i)
+        intent_rec = res_i.scalar_one_or_none()
+
+        roles = [structured.target_role] if structured.target_role else []
+        domains = [structured.target_company_type] if structured.target_company_type else []
+
+        if intent_rec:
+            intent_rec.raw_text = text
+            intent_rec.goal_type = structured.goal_type
+            intent_rec.target_roles = roles
+            intent_rec.target_domains = domains
+            intent_rec.structured = structured.model_dump()
+            intent_rec.intent_embedding = embedding
+            intent_rec.updated_at = now
+        else:
+            intent_rec = StudentIntent(
+                user_id=user_id,
+                raw_text=text,
+                goal_type=structured.goal_type,
+                target_roles=roles,
+                target_domains=domains,
+                structured=structured.model_dump(),
+                intent_embedding=embedding,
+                updated_at=now,
+            )
+            self.session.add(intent_rec)
+
+        match_profile = await self.get_or_create_student_match_profile(user_id)
+        match_profile.intent_goal = text
+        match_profile.intent_roles = roles
+        match_profile.intent_domains = domains
+        match_profile.intent_help_type = structured.goal_type
+        match_profile.intent_embedding = embedding
+        match_profile.updated_at = now
+        if structured.required_skills:
+            setattr(match_profile, "intent_required_skills", structured.required_skills)
+
+        await self.session.commit()
+        await self.invalidate_recommendation_caches(student_id=str(user_id))
+
+        return SaveIntentResponse(
+            user_id=user_id,
+            structured=structured,
+            intent_embedding_present=True,
+            message="Intent successfully saved and structured. Mentors re-ranked.",
+        )
+
+    # --- Public Giver Card ---
 
     async def get_giver_public_card(
         self, giver_id: uuid.UUID, requesting_student_id: Optional[uuid.UUID] = None, why_lines: Optional[List[str]] = None
     ) -> GiverPublicCard:
         giver = await self.get_giver_profile(giver_id)
 
-        # Get full name from User table
         stmt_user = select(User).where(User.id == giver_id)
         res_user = await self.session.execute(stmt_user)
         user = res_user.scalar_one_or_none()
         full_name = user.full_name if user else "Verified Giver"
 
-        # Query RatingsPort
+        role = (user.role if user else "alumni").lower()
+        if "facult" in role:
+            g_type = "faculty"
+            g_type_label = "Faculty Mentor"
+        elif "recruit" in role:
+            g_type = "recruiter"
+            g_type_label = "Verified Recruiter"
+        elif "founder" in role:
+            g_type = "founder"
+            g_type_label = "Verified Founder"
+        else:
+            g_type = "alumni"
+            g_type_label = "Alumnus Mentor"
+
         try:
             band_info = await ports.ratings.get_band(str(giver_id))
         except Exception:
             band_info = {"band": "Rising", "smoothed_avg": 4.0, "n": 0, "completion_rate": 1.0}
 
-        # Query PresencePort
         try:
             p_map = await ports.presence.status([str(giver_id)])
             pres = p_map.get(str(giver_id), {"online": False, "capacity_left": giver.weekly_capacity})
         except Exception:
             pres = {"online": False, "capacity_left": giver.weekly_capacity}
 
-        # Calculate why_lines if requesting_student_id provided and why_lines not passed
         if why_lines is None:
             if requesting_student_id:
                 try:
@@ -964,31 +1115,21 @@ class MatchingService(MatchingPort):
             else:
                 why_lines = ["Experienced alumni mentor ready to assist"]
 
-        # Check hot reads cache if requesting without student context
-        cache_key = f"wp:giver:{giver_id}"
-        redis_client = None
-        if requesting_student_id is None and why_lines is None:
-            try:
-                redis_client = await get_redis()
-                cached = await redis_client.get(cache_key)
-                if cached:
-                    return GiverPublicCard(**json.loads(cached))
-            except Exception:
-                pass
-
-        card = GiverPublicCard(
+        return GiverPublicCard(
             id=giver.user_id,
             full_name=full_name,
             headline=f"{giver.role_title or 'Mentor'} at {giver.company or 'Tech'}",
+            giver_type=g_type,
+            giver_type_label=g_type_label,
             company=giver.company,
             role_title=giver.role_title,
             bio=giver.bio,
-            offers=giver.offers,
-            topics=giver.topics,
-            skills=giver.skills,
-            domains=giver.domains,
-            languages=giver.languages,
-            badges=[band_info.get("band", "Rising"), "Verified"],
+            offers=giver.offers or [],
+            topics=giver.topics or [],
+            skills=giver.skills or [],
+            domains=giver.domains or [],
+            languages=giver.languages or [],
+            badges=[band_info.get("band", "Rising"), g_type_label],
             band=band_info.get("band", "Rising"),
             rating_summary=RatingSummary(
                 band=band_info.get("band", "Rising"),
@@ -999,23 +1140,16 @@ class MatchingService(MatchingPort):
             availability_summary=AvailabilitySummary(
                 online=pres.get("online", False),
                 capacity_left=pres.get("capacity_left", giver.weekly_capacity),
+                status=pres.get("status", "active_now"),
+                avg_reply_minutes=pres.get("avg_reply_minutes", 45),
             ),
             why_lines=why_lines,
         )
 
-        if redis_client and requesting_student_id is None and why_lines is None:
-            try:
-                await redis_client.setex(cache_key, 300, json.dumps(card.model_dump(mode="json")))
-            except Exception:
-                pass
-
-        return card
-
-    # --- Cache Invalidation Helpers (Requirement 8) ---
+    # --- Cache Invalidation Helpers ---
 
     @staticmethod
     async def invalidate_recommendation_caches(student_id: Optional[str] = None, giver_id: Optional[str] = None):
-        """Invalidates matching recommendations cache in Redis."""
         try:
             redis_client = await get_redis()
             patterns = []

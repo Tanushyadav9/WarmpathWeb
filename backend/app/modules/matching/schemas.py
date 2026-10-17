@@ -49,12 +49,18 @@ class GiverProfileResponse(BaseModel):
 # --- Scoring & Explainability Schemas ---
 
 class ScoreComponents(BaseModel):
-    expertise_fit: float = Field(..., ge=0.0, le=1.0)
-    intent_fit: float = Field(..., ge=0.0, le=1.0)
-    affinity: float = Field(..., ge=0.0, le=1.0)
-    availability: float = Field(..., ge=0.0, le=1.0)
-    rating: float = Field(..., ge=0.0, le=1.0)
-    response_odds: float = Field(..., ge=0.0, le=1.0)
+    # 6 Core Weights from config/matching.json
+    skill_intent_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
+    similar_journey: float = Field(default=0.0, ge=0.0, le=1.0)
+    affinity: float = Field(default=0.0, ge=0.0, le=1.0)
+    rating: float = Field(default=0.0, ge=0.0, le=1.0)
+    availability: float = Field(default=0.0, ge=0.0, le=1.0)
+    response_speed: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # Legacy / Compatibility fields
+    expertise_fit: float = Field(default=0.0, ge=0.0, le=1.0)
+    intent_fit: float = Field(default=0.0, ge=0.0, le=1.0)
+    response_odds: float = Field(default=0.0, ge=0.0, le=1.0)
     cold_start_boost: float = Field(default=0.0, ge=0.0)
     total_score: float = Field(..., ge=0.0, le=1.0)
 
@@ -69,6 +75,8 @@ class RatingSummary(BaseModel):
 class AvailabilitySummary(BaseModel):
     online: bool = False
     capacity_left: int = 3
+    status: str = "active_now"
+    avg_reply_minutes: int = 45
 
 
 # --- Public Giver Card & Feed Schemas ---
@@ -77,6 +85,8 @@ class GiverPublicCard(BaseModel):
     id: uuid.UUID
     full_name: str
     headline: str
+    giver_type: str = "alumni"  # alumni | faculty | recruiter | founder
+    giver_type_label: str = "Alumnus Mentor"  # Alumnus Mentor | Faculty Mentor | Verified Recruiter | Verified Founder
     company: Optional[str] = None
     role_title: Optional[str] = None
     bio: Optional[str] = None
@@ -100,9 +110,88 @@ class RecommendationItem(BaseModel):
     lock_reason: Optional[str] = None
 
 
+class HardGateExclusionSummary(BaseModel):
+    total_excluded: int = 0
+    reasons: Dict[str, int] = Field(
+        default_factory=lambda: {
+            "unverified": 0,
+            "suspended": 0,
+            "inactive_too_long": 0,
+            "over_capacity": 0,
+        }
+    )
+
+
 class RecommendationsResponse(BaseModel):
     items: List[RecommendationItem]
+    excluded_summary: HardGateExclusionSummary = Field(default_factory=HardGateExclusionSummary)
     next_cursor: Optional[str] = None
     scope: str
     locked: bool = False
     lock_reason: Optional[str] = None
+
+
+# --- Jury / Admin Explain Ranking Schemas ---
+
+class CandidateRankingExplanation(BaseModel):
+    giver_id: uuid.UUID
+    giver_name: str
+    giver_type: str
+    giver_type_label: str
+    role_title: Optional[str] = None
+    company: Optional[str] = None
+    score_breakdown: ScoreComponents
+    shared_skills: List[str] = Field(default_factory=list)
+    same_college: bool = False
+    same_branch: bool = False
+    availability_status: str = "active_now"
+    avg_reply_minutes: int = 45
+    rating_avg: float = 4.0
+    why_lines: List[str] = Field(default_factory=list)
+
+
+class ExplainRankingResponse(BaseModel):
+    weights: Dict[str, float]
+    hard_gates_config: Dict[str, Any]
+    excluded_summary: HardGateExclusionSummary
+    candidates: List[CandidateRankingExplanation]
+
+
+# --- Intent & Request Quality Schemas (F6 & F7) ---
+
+class IntentQualityCheckRequest(BaseModel):
+    text: str
+
+
+class IntentQualityCheckResponse(BaseModel):
+    quality_score: float
+    is_vague: bool
+    is_blocked: bool
+    block_reason: Optional[str] = None
+    issues: List[str] = Field(default_factory=list)
+    suggested_refinement: Optional[str] = None
+    examples: List[str] = Field(default_factory=list)
+
+
+class StructuredIntentData(BaseModel):
+    goal_type: str  # mentor | referral | mock_interview | resume_review | project_feedback
+    target_role: Optional[str] = None
+    target_company_type: Optional[str] = None
+    required_skills: List[str] = Field(default_factory=list)
+    timeline: Optional[str] = None
+    raw_text: str
+
+
+class SaveIntentRequest(BaseModel):
+    text: str
+    goal_type: Optional[str] = None
+    target_role: Optional[str] = None
+    target_company_type: Optional[str] = None
+    required_skills: Optional[List[str]] = None
+
+
+class SaveIntentResponse(BaseModel):
+    user_id: uuid.UUID
+    structured: StructuredIntentData
+    intent_embedding_present: bool = True
+    message: str = "Intent saved successfully"

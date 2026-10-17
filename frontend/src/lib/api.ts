@@ -281,4 +281,40 @@ export async function deleteUserAccount() {
   });
 }
 
+// Matching & Intent APIs (F6, F7, F8, F9, F10)
+export async function checkIntentQuality(text: string) {
+  return apiFetch("/api/v1/intent/quality-check", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function structureIntent(text: string) {
+  return apiFetch("/api/v1/intent/structure", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function saveStudentIntent(payload: {
+  text: string;
+  goal_type?: string;
+  target_role?: string;
+  target_company_type?: string;
+  required_skills?: string[];
+}) {
+  return apiFetch("/api/v1/intent", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchRecommendations(scope: string = "own_college") {
+  return apiFetch(`/api/v1/recommendations?scope=${scope}`);
+}
+
+export async function explainRanking(scope: string = "own_college") {
+  return apiFetch(`/api/v1/recommendations/explain-ranking?scope=${scope}`);
+}
+
 
