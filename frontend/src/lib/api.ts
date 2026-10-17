@@ -76,6 +76,10 @@ export async function apiFetch<T = any>(
     throw new Error(errorDetail);
   }
 
+  if (res.status === 204) {
+    return null as unknown as T;
+  }
+
   return res.json();
 }
 
@@ -210,4 +214,71 @@ export async function createOpportunity(payload: any) {
     body: JSON.stringify(payload),
   });
 }
+
+// Student Resume & Profile APIs (F4, F5, F33)
+export async function fetchStudentProfile() {
+  return apiFetch("/api/v1/resume/profile");
+}
+
+export async function uploadResumeFile(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return apiFetch("/api/v1/resume", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function updateStudentProfile(profileData: any) {
+  return apiFetch("/api/v1/resume/profile", {
+    method: "PUT",
+    body: JSON.stringify(profileData),
+  });
+}
+
+export async function confirmStudentProfile() {
+  return apiFetch("/api/v1/resume/confirm", {
+    method: "PUT",
+  });
+}
+
+export async function submitGitHubProof(repoUrl: string) {
+  return apiFetch("/api/v1/profile/github-proof", {
+    method: "POST",
+    body: JSON.stringify({ repo_url: repoUrl }),
+  });
+}
+
+export async function fetchGitHubProof() {
+  return apiFetch("/api/v1/profile/github-proof");
+}
+
+export async function fetchConsents() {
+  return apiFetch("/api/v1/me/consents");
+}
+
+export async function updateConsents(consents: Array<{ purpose: string; granted: boolean }>) {
+  return apiFetch("/api/v1/me/consents", {
+    method: "PUT",
+    body: JSON.stringify({ consents }),
+  });
+}
+
+export async function withdrawConsent(purpose: string) {
+  return apiFetch("/api/v1/privacy/withdraw-consent", {
+    method: "POST",
+    body: JSON.stringify({ purpose }),
+  });
+}
+
+export async function exportUserData() {
+  return apiFetch("/api/v1/privacy/export-data");
+}
+
+export async function deleteUserAccount() {
+  return apiFetch("/api/v1/privacy/delete-account", {
+    method: "DELETE",
+  });
+}
+
 

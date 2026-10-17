@@ -91,7 +91,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             pass
 
     cleaned_text = extracted_text.strip()
-    if len(cleaned_text) < 50:
+    if len(cleaned_text) < 10:
         raise AppError(
             code="resume_unreadable",
             message="The uploaded document contains scanned image content with no extractable text. Please upload a standard text PDF or DOCX.",

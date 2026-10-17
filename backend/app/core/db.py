@@ -60,6 +60,14 @@ class AsyncSessionWrapper:
     def __init__(self, sync_session):
         self._s = sync_session
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            await self.rollback()
+        await self.close()
+
     async def execute(self, statement, *args, **kwargs):
         return self._s.execute(statement, *args, **kwargs)
 
@@ -80,6 +88,12 @@ class AsyncSessionWrapper:
 
     def add_all(self, instances):
         self._s.add_all(instances)
+
+    async def delete(self, instance):
+        self._s.delete(instance)
+
+    def delete_sync(self, instance):
+        self._s.delete(instance)
 
     async def close(self):
         self._s.close()
@@ -139,7 +153,41 @@ from app.core.models import (  # noqa: E402, F401
     EmailOTP,
     VerificationRequest,
     PeerVouchRequest,
+    Consent,
+    SkillTaxonomy,
+    StudentIntent,
+    StudentMatchProfile,
 )
+
+if is_sqlite:
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            cols_to_add = [
+                ("student_profiles", "raw_text", "TEXT"),
+                ("student_profiles", "resume_file_path", "VARCHAR(500)"),
+                ("student_profiles", "parsed", "JSON"),
+                ("student_profiles", "edited", "JSON"),
+                ("student_profiles", "is_confirmed", "BOOLEAN DEFAULT 0"),
+                ("student_profiles", "skills_label", "VARCHAR(100) DEFAULT 'extracted skills, student-confirmed'"),
+                ("student_profiles", "hide_cgpa", "BOOLEAN DEFAULT 0"),
+                ("student_match_profiles", "has_github_proof", "BOOLEAN DEFAULT 0"),
+                ("giver_profiles", "daily_impressions_count", "INTEGER DEFAULT 0"),
+                ("giver_profiles", "institution_id", "INTEGER"),
+                ("giver_profiles", "department", "VARCHAR(100)"),
+                ("giver_profiles", "batch", "INTEGER"),
+                ("giver_profiles", "societies", "JSON"),
+                ("giver_profiles", "skills", "JSON"),
+                ("giver_profiles", "domains", "JSON"),
+                ("giver_profiles", "response_stats", "JSON"),
+            ]
+            for table, col, col_type in cols_to_add:
+                try:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {col_type};")
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 

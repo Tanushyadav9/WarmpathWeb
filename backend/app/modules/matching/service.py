@@ -288,15 +288,42 @@ class MatchingService(MatchingPort):
             res_user = await self.session.execute(stmt_user)
             user = res_user.scalar_one_or_none()
 
+            # Query StudentProfile for actual skills, domains, and embedding if exists
+            from app.core.models import StudentProfile, GitHubProof
+            stmt_sp = select(StudentProfile).where(StudentProfile.user_id == student_id)
+            res_sp = await self.session.execute(stmt_sp)
+            sp = res_sp.scalar_one_or_none()
+
+            skills = [{"name": "Python", "category": "Programming Languages"}]
+            domains = ["Web Development", "AI/ML"]
+            profile_embedding = None
+            if sp and (sp.edited or sp.parsed):
+                merged = dict(sp.parsed or {})
+                if sp.edited:
+                    merged.update(sp.edited)
+                skills = merged.get("skills", skills)
+                domains = merged.get("domains", domains)
+                profile_embedding = sp.embedding
+
+            if not profile_embedding:
+                profile_embedding = deterministic_dummy_vector(f"student:{student_id}:profile")
+
+            # Check GitHub proof
+            stmt_gh = select(GitHubProof).where(GitHubProof.user_id == student_id)
+            res_gh = await self.session.execute(stmt_gh)
+            gh = res_gh.scalar_one_or_none()
+
             match_profile = StudentMatchProfile(
                 user_id=student_id,
                 institution_id=user.institution_id if user else None,
                 department="Computer Science",
                 batch=2026,
                 societies=["ACM"],
-                skills=[{"name": "Python", "category": "Programming Languages"}],
-                domains=["Web Development", "AI/ML"],
-                profile_embedding=deterministic_dummy_vector(f"student:{student_id}:profile"),
+                skills=skills,
+                domains=domains,
+                profile_embedding=profile_embedding,
+                has_github_proof=gh is not None,
+                github_languages=gh.top_languages if gh else [],
                 intent_goal="Find mentorship for software engineering internship",
                 intent_roles=["Software Engineer Intern"],
                 intent_domains=["Technology"],
@@ -345,7 +372,9 @@ class MatchingService(MatchingPort):
         all_skills = student_skills.union(combined_giver_skills)
         jaccard = len(shared_skills) / max(1, len(all_skills))
 
-        expertise_fit = min(1.0, 0.7 * cos_expertise + 0.3 * jaccard)
+        # Boost for GitHub Proof of work (F5)
+        github_boost = 0.05 if getattr(student, "has_github_proof", False) else 0.0
+        expertise_fit = min(1.0, 0.7 * cos_expertise + 0.3 * jaccard + github_boost)
 
         # 2. Intent Fit (25%)
         cos_intent = cosine_similarity(student.intent_embedding, giver.embedding)
@@ -509,6 +538,12 @@ class MatchingService(MatchingPort):
         elif scores.cold_start_boost > 0:
             why_lines.append("Rising alumni mentor eager to guide")
 
+        # 6. GitHub Proof of work explanation
+        if getattr(student, "has_github_proof", False) and getattr(student, "github_languages", None):
+            why_lines.append(
+                f"Verified GitHub proof of work in {', '.join(student.github_languages[:2])}"
+            )
+
         # Deterministic deduplication while maintaining order
         seen: Set[str] = set()
         deduped = []
@@ -555,7 +590,21 @@ class MatchingService(MatchingPort):
         filter_domain: Optional[str] = None,
         filter_help_type: Optional[str] = None,
     ) -> RecommendationsResponse:
-        # 1. Hard Gate on Student: must be verified
+        # 1. Hard Gate on Student: must be verified and have granted profile_matching consent
+        from app.core.models import Consent
+        stmt_consent = select(Consent).where(
+            Consent.user_id == student_id,
+            Consent.purpose == "profile_matching",
+        )
+        res_consent = await self.session.execute(stmt_consent)
+        consent_record = res_consent.scalar_one_or_none()
+        if consent_record and not consent_record.granted:
+            raise AppError(
+                code="consent_required",
+                message="DPDP consent for 'profile_matching' is required to receive recommendations.",
+                status_code=403,
+            )
+
         try:
             student_level = await ports.trust.get_level(str(student_id))
             if student_level in ["new", "restricted"]:
@@ -781,11 +830,11 @@ class MatchingService(MatchingPort):
                 company=giver.company,
                 role_title=giver.role_title,
                 bio=bio,
-                offers=giver.offers,
-                topics=giver.topics,
-                skills=giver.skills,
-                domains=giver.domains,
-                languages=giver.languages,
+                offers=giver.offers or [],
+                topics=giver.topics or [],
+                skills=giver.skills or [],
+                domains=giver.domains or [],
+                languages=giver.languages or [],
                 badges=[band_info.get("band", "Rising"), "Verified"],
                 band=band_info.get("band", "Rising"),
                 rating_summary=RatingSummary(
@@ -933,7 +982,7 @@ class MatchingService(MatchingPort):
             headline=f"{giver.role_title or 'Mentor'} at {giver.company or 'Tech'}",
             company=giver.company,
             role_title=giver.role_title,
-            bio=bio,
+            bio=giver.bio,
             offers=giver.offers,
             topics=giver.topics,
             skills=giver.skills,

@@ -21,9 +21,13 @@ from app.core.ports import ports
 from app.core.redis import close_redis
 
 
+from app.core.db import init_db
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    await init_db(force_recreate=False)
     yield
     await close_redis()
 

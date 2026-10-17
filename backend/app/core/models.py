@@ -104,6 +104,11 @@ class User(Base):
     capacity = relationship("Capacity", back_populates="user", uselist=False, cascade="all, delete-orphan")
     credit_wallet = relationship("CreditWallet", back_populates="user", uselist=False, cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+    github_proof = relationship("GitHubProof", cascade="all, delete-orphan", uselist=False)
+    consents = relationship("Consent", cascade="all, delete-orphan")
+    resumes = relationship("Resume", cascade="all, delete-orphan")
+    student_intent = relationship("StudentIntent", cascade="all, delete-orphan", uselist=False)
+    student_match_profile = relationship("StudentMatchProfile", cascade="all, delete-orphan", uselist=False)
 
 
 # 3. Student Profiles (Seeker)
@@ -120,6 +125,13 @@ class StudentProfile(Base):
     target_domain = Column(String(100), nullable=True)
     intent_ask = Column(Text, nullable=True)
     embedding = Column(VectorFallbackType(768), nullable=True)
+    raw_text = Column(Text, nullable=True)
+    resume_file_path = Column(String(500), nullable=True)
+    parsed = Column(JSON, nullable=True)
+    edited = Column(JSON, nullable=True)
+    is_confirmed = Column(Boolean, default=False, nullable=False)
+    skills_label = Column(String(100), default="extracted skills, student-confirmed", nullable=False)
+    hide_cgpa = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
@@ -144,6 +156,14 @@ class GiverProfile(Base):
     rating_count = Column(Integer, nullable=False, default=0)
     completion_rate = Column(Float, nullable=False, default=1.0)
     weekly_capacity = Column(Integer, nullable=False, default=2)
+    daily_impressions_count = Column(Integer, nullable=False, default=0)
+    institution_id = Column(Integer, ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True)
+    department = Column(String(100), nullable=True)
+    batch = Column(Integer, nullable=True)
+    societies = Column(JSON, nullable=False, default=list)
+    skills = Column(JSON, nullable=False, default=list)
+    domains = Column(JSON, nullable=False, default=list)
+    response_stats = Column(JSON, nullable=False, default=dict)
     embedding = Column(VectorFallbackType(768), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
@@ -516,4 +536,69 @@ class PeerVouchRequest(Base):
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     responded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# 30. DPDP Consents (F33)
+class Consent(Base):
+    __tablename__ = "consents"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    purpose = Column(String(100), nullable=False)
+    granted = Column(Boolean, default=False, nullable=False)
+    granted_at = Column(DateTime(timezone=True), nullable=True)
+    withdrawn_at = Column(DateTime(timezone=True), nullable=True)
+    text_version = Column(String(20), default="v1.0", nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "purpose", name="uq_user_purpose_consent"),
+    )
+
+
+# 31. Skills Taxonomy (F4)
+class SkillTaxonomy(Base):
+    __tablename__ = "skills_taxonomy"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(100), unique=True, index=True, nullable=False)
+    category = Column(String(100), index=True, nullable=False)
+    aliases = Column(JSON, default=list, nullable=False)
+
+
+# 32. Student Intent (F6)
+class StudentIntent(Base):
+    __tablename__ = "student_intents"
+
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    raw_text = Column(Text, nullable=False)
+    goal_type = Column(String(50), nullable=True)
+    target_roles = Column(JSON, default=list, nullable=False)
+    target_domains = Column(JSON, default=list, nullable=False)
+    structured = Column(JSON, nullable=True)
+    intent_embedding = Column(VectorFallbackType(768), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+# 33. Student Match Profile Projection (F8)
+class StudentMatchProfile(Base):
+    __tablename__ = "student_match_profiles"
+
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    institution_id = Column(Integer, nullable=True)
+    department = Column(String(100), nullable=True)
+    batch = Column(Integer, nullable=True)
+    societies = Column(JSON, nullable=False, default=list)
+    skills = Column(JSON, nullable=False, default=list)
+    domains = Column(JSON, nullable=False, default=list)
+    profile_embedding = Column(VectorFallbackType(768), nullable=True)
+    intent_goal = Column(Text, nullable=True)
+    intent_roles = Column(JSON, nullable=False, default=list)
+    intent_domains = Column(JSON, nullable=False, default=list)
+    intent_help_type = Column(String(100), nullable=True)
+    intent_embedding = Column(VectorFallbackType(768), nullable=True)
+    profile_version = Column(Integer, nullable=False, default=1)
+    has_github_proof = Column(Boolean, default=False, nullable=False)
+    github_languages = Column(JSON, nullable=False, default=list)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
 

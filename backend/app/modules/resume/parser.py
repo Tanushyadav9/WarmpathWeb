@@ -152,6 +152,8 @@ async def call_gemini_json(system_instruction: str, user_content: str) -> Dict[s
     api_key = settings.GEMINI_API_KEY
     if not api_key or api_key == "your_gemini_api_key_here":
         # Fallback heuristic parser if no API key is provided during testing
+        if "student intent" in system_instruction.lower():
+            return _fallback_heuristic_intent_parse(user_content)
         return _fallback_heuristic_parse(user_content)
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMINI_TEXT_MODEL}:generateContent?key={api_key}"
@@ -298,3 +300,42 @@ def _fallback_heuristic_parse(text: str) -> Dict[str, Any]:
         },
         "confidence": 0.95,
     }
+
+
+def _fallback_heuristic_intent_parse(text: str) -> Dict[str, Any]:
+    """Fallback heuristic parser for student intent structuring."""
+    lower = text.lower()
+    help_type = "guidance"
+    if "interview" in lower or "mock" in lower:
+        help_type = "mock_interview"
+    elif "referral" in lower or "refer" in lower:
+        help_type = "referral"
+    elif "resume" in lower or "review" in lower:
+        help_type = "mentorship"
+
+    roles = []
+    if "backend" in lower:
+        roles.append("Backend Intern")
+    if "software" in lower or "engineer" in lower:
+        roles.append("Software Engineer Intern")
+    if not roles:
+        roles = ["Software Engineer Intern"]
+
+    domains = []
+    if "fintech" in lower:
+        domains.append("Fintech")
+    if "distributed" in lower:
+        domains.append("Distributed Systems")
+    if "ai" in lower or "ml" in lower:
+        domains.append("AI/ML")
+    if not domains:
+        domains = ["Technology"]
+
+    return {
+        "goal": text[:100],
+        "roles": roles,
+        "domains": domains,
+        "urgency": "normal",
+        "help_type": help_type,
+    }
+

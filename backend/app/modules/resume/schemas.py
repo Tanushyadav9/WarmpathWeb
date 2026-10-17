@@ -81,8 +81,52 @@ class StudentProfileResponse(BaseModel):
     parsed: Optional[Dict[str, Any]] = None
     edited: Optional[Dict[str, Any]] = None
     merged: Dict[str, Any]
+    is_confirmed: bool = False
+    skills_label: str = "extracted skills, student-confirmed"
+    hide_cgpa: bool = False
     has_embedding: bool
     updated_at: datetime
+
+
+# --- GitHub Proof Schemas (F5) ---
+
+class GitHubProofRequest(BaseModel):
+    repo_url: Optional[str] = None
+    username: Optional[str] = None
+
+
+class GitHubProofResponse(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    username: str
+    repo_url: str
+    repo_count: int
+    top_languages: List[str]
+    total_commits: int
+    stars_count: int
+    verified_at: datetime
+    badge: str = "Proof of work"
+
+
+# --- Privacy & DPDP Schemas (F33) ---
+
+class ProfileVisibilityUpdateRequest(BaseModel):
+    hide_cgpa: Optional[bool] = None
+
+
+class WithdrawConsentRequest(BaseModel):
+    purpose: str
+
+
+class DataExportResponse(BaseModel):
+    user: Dict[str, Any]
+    profile: Optional[Dict[str, Any]] = None
+    resume: Optional[Dict[str, Any]] = None
+    github_proof: Optional[Dict[str, Any]] = None
+    consents: List[Dict[str, Any]] = Field(default_factory=list)
+    requests: List[Dict[str, Any]] = Field(default_factory=list)
+    exported_at: datetime
+
 
 
 # --- Intent Schemas ---

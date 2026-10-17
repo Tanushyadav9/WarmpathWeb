@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # Application
     PROJECT_NAME: str = "WarmPath"
     ENVIRONMENT: str = "development"
+    DEMO_MODE: bool = True
     PORT: int = 8000
     APP_SECRET_KEY: str = "warmpath-insecure-secret-key-change-in-production"
 
