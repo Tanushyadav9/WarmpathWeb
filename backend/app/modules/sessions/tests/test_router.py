@@ -3,10 +3,11 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 
 @pytest.mark.asyncio
-async def test_sessions_endpoints_return_501():
+async def test_sessions_requests_endpoint():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/requests")
-        assert response.status_code == 501
-        data = response.json()
-        assert data["error"]["code"] == "module_not_implemented"
+    headers = {"X-User-Id": "11111111-1111-1111-1111-111111111111"}
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as client:
+        # GET /requests
+        response = await client.get("/requests")
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)

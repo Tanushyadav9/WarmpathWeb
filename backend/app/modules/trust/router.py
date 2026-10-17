@@ -1,5 +1,11 @@
-from fastapi import APIRouter, WebSocket, Request, Response
+import uuid
+from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.db import get_db
 from app.core.errors import ModuleNotImplemented
+from app.core.security import get_current_user_id
+from app.modules.trust.schemas import TrustScoreResponse
+from app.modules.trust.service import trust_service
 
 router = APIRouter(tags=["trust"])
 
@@ -15,9 +21,12 @@ async def post_blocks():
 async def delete_blocks_user_id():
     raise ModuleNotImplemented("/blocks/{user_id}")
 
-@router.get("/me/trust", summary="Retrieve current private trust score and safety limits")
-async def get_me_trust():
-    raise ModuleNotImplemented("/me/trust")
+@router.get("/me/trust", response_model=TrustScoreResponse, summary="Retrieve current private trust score and safety limits")
+async def get_me_trust(request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = uuid.UUID(get_current_user_id(request))
+    details = await trust_service.get_trust_details(db, user_id)
+    return TrustScoreResponse(**details)
+
 
 @router.get("/admin/moderation/queue", summary="List pending moderation reports")
 async def get_admin_moderation_queue():

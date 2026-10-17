@@ -28,9 +28,30 @@ class TrustPort(Protocol):
         """Returns True if communication between user_a and user_b is blocked"""
         ...
 
+    async def get_score(self, user_id: str) -> Dict[str, Any]:
+        """Returns {score: int, level: str, max_open_requests: int, breakdown: Dict[str, Any]}"""
+        ...
+
+
+@runtime_checkable
+class SessionsPort(Protocol):
+    async def get_giver_stats(self, giver_id: str) -> Dict[str, Any]:
+        """Returns {total_requests: int, responded_requests: int, response_rate: float, avg_reply_time_seconds: Optional[float], avg_reply_time_display: str, weekly_sessions_count: int, monthly_free_sessions_count: int}"""
+        ...
+
+    async def get_student_session_stats(self, student_id: str) -> Dict[str, Any]:
+        """Returns {open_requests_count: int, completed_sessions_count: int, unrated_completed_count: int}"""
+        ...
+
+    async def mark_session_rated(self, session_id: str) -> None:
+        """Marks a session request as rated by student"""
+        ...
+
+
 
 @runtime_checkable
 class CreditsPort(Protocol):
+
     async def can_access(self, student_id: str, giver_id: str) -> Dict[str, Any]:
         """Returns {allowed: bool, reason: str, plan: str, cost: int}"""
         ...
@@ -86,6 +107,21 @@ class DefaultTrustPort(TrustPort):
     async def is_blocked(self, user_a: str, user_b: str) -> bool:
         raise PortNotReady("TrustPort")
 
+    async def get_score(self, user_id: str) -> Dict[str, Any]:
+        raise PortNotReady("TrustPort")
+
+
+class DefaultSessionsPort(SessionsPort):
+    async def get_giver_stats(self, giver_id: str) -> Dict[str, Any]:
+        raise PortNotReady("SessionsPort")
+
+    async def get_student_session_stats(self, student_id: str) -> Dict[str, Any]:
+        raise PortNotReady("SessionsPort")
+
+    async def mark_session_rated(self, session_id: str) -> None:
+        raise PortNotReady("SessionsPort")
+
+
 
 class DefaultCreditsPort(CreditsPort):
     async def can_access(self, student_id: str, giver_id: str) -> Dict[str, Any]:
@@ -122,6 +158,7 @@ class PortRegistry:
     def __init__(self):
         self.safety: SafetyPort = DefaultSafetyPort()
         self.trust: TrustPort = DefaultTrustPort()
+        self.sessions: SessionsPort = DefaultSessionsPort()
         self.credits: CreditsPort = DefaultCreditsPort()
         self.ratings: RatingsPort = DefaultRatingsPort()
         self.presence: PresencePort = DefaultPresencePort()
@@ -129,3 +166,4 @@ class PortRegistry:
 
 
 ports = PortRegistry()
+

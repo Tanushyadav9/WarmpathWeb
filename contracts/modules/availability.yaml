@@ -2,50 +2,122 @@ paths:
   /me/availability:
     put:
       summary: "Set weekly schedule and session capacity limit"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [active_now, available_today, inactive]
+                today_window:
+                  type: string
+                  example: "8 to 10 pm"
+                weekly_capacity_cap:
+                  type: integer
+                  example: 5
+                monthly_free_session_cap:
+                  type: integer
+                  example: 10
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Updated availability settings
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /me/availability:
+                $ref: '#/components/schemas/AvailabilityResponse'
     get:
       summary: "Retrieve current availability schedule"
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Current availability settings and response metrics
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/AvailabilityResponse'
   /me/online:
     post:
       summary: "Open 30-minute instant connect window"
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Giver set to active_now
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /me/online:
+                $ref: '#/components/schemas/AvailabilityResponse'
     delete:
       summary: "Close instant connect window"
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Giver set to inactive
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/AvailabilityResponse'
   /presence:
     get:
       summary: "Check online and capacity status for givers"
+      parameters:
+        - in: query
+          name: user_ids
+          schema:
+            type: string
+          description: Comma-separated list of user IDs
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Presence status mapping
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                type: object
+                properties:
+                  users:
+                    type: object
+components:
+  schemas:
+    AvailabilityResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+        status:
+          type: string
+          enum: [active_now, available_today, inactive]
+        today_window:
+          type: string
+          nullable: true
+        status_color:
+          type: string
+          example: "#15803D"
+        status_label:
+          type: string
+          example: "Active now"
+        weekly_capacity_cap:
+          type: integer
+        weekly_sessions_used:
+          type: integer
+        monthly_free_session_cap:
+          type: integer
+        monthly_free_sessions_used:
+          type: integer
+        capacity_left:
+          type: integer
+        capacity_reached:
+          type: boolean
+        capacity_banner:
+          type: string
+          nullable: true
+        response_rate:
+          type: number
+          example: 95.0
+        avg_reply_time_seconds:
+          type: number
+          nullable: true
+        avg_reply_time_display:
+          type: string
+          example: "2h"
+        last_active_at:
+          type: string
+          nullable: true

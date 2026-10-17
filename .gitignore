@@ -20,7 +20,10 @@ env/
 venv/
 ENV/
 .venv/
+*.db
+*.sqlite*
 build/
+
 develop-eggs/
 dist/
 downloads/

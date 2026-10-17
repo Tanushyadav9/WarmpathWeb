@@ -1,11 +1,25 @@
-from fastapi import APIRouter, WebSocket, Request, Response
+import uuid
+from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.db import get_db
 from app.core.errors import ModuleNotImplemented
+from app.core.security import get_current_user_id
+from app.modules.ratings.schemas import RatingCreateInput, RatingResponse
+from app.modules.ratings.service import ratings_service
 
 router = APIRouter(tags=["ratings"])
 
-@router.post("/sessions/{id}/rating", summary="Student rates session quality (1-5 + feedback)")
-async def post_sessions_id_rating():
-    raise ModuleNotImplemented("/sessions/{id}/rating")
+@router.post("/sessions/{id}/rating", response_model=RatingResponse, summary="Student rates session quality (1-5 + feedback)")
+async def post_sessions_id_rating(
+    id: str,
+    req: RatingCreateInput,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    session_id = uuid.UUID(id)
+    rater_id = uuid.UUID(get_current_user_id(request))
+    return await ratings_service.submit_rating(db, session_id, rater_id, req)
+
 
 @router.post("/sessions/{id}/request-quality", summary="Giver rates student preparation and request clarity")
 async def post_sessions_id_request_quality():

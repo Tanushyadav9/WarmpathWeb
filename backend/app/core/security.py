@@ -51,3 +51,21 @@ def decode_token(token: str) -> Dict[str, Any]:
         raise AppError(code="token_expired", message="Token has expired", status_code=401)
     except jwt.InvalidTokenError:
         raise AppError(code="token_invalid", message="Invalid token", status_code=401)
+
+
+DEFAULT_DEMO_USER_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def get_current_user_id(request: Request) -> str:
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        data = decode_token(token)
+        return str(data.get("sub", DEFAULT_DEMO_USER_ID))
+
+    user_header = request.headers.get("X-User-Id")
+    if user_header:
+        return user_header
+
+    return DEFAULT_DEMO_USER_ID
+

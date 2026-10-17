@@ -94,5 +94,17 @@ class Settings(BaseSettings):
     REQUEST_LIMIT_ESTABLISHED: int = 25
     REQUEST_LIMIT_RESTRICTED: int = 1
 
+    # Availability & Capacity Defaults
+    INACTIVE_AFTER_DAYS: int = 7
+    DEFAULT_WEEKLY_CAPACITY_CAP: int = 5
+    DEFAULT_MONTHLY_FREE_SESSION_CAP: int = 10
+
+    # Graduated Open Requests Limits by Trust Level
+    MAX_OPEN_REQUESTS_NEW: int = 3
+    MAX_OPEN_REQUESTS_VERIFIED: int = 10
+    MAX_OPEN_REQUESTS_ESTABLISHED: int = 25
+    MAX_OPEN_REQUESTS_RESTRICTED: int = 1
+
 
 settings = Settings()
+
