@@ -123,3 +123,91 @@ export async function markAllNotificationsRead() {
     method: "POST",
   });
 }
+
+// Verification APIs (F2 & F3)
+export async function sendOtp(email: string, purpose: string = "alumni_registration") {
+  return apiFetch("/api/v1/verification/send-otp", {
+    method: "POST",
+    body: JSON.stringify({ email, purpose }),
+  });
+}
+
+export async function registerAlumni(payload: any) {
+  const data = await apiFetch("/api/v1/verification/register-alumni", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (data.access_token && data.user) {
+    setSession(data.access_token, data.user);
+  }
+  return data;
+}
+
+export async function registerEmployer(payload: any) {
+  const data = await apiFetch("/api/v1/verification/register-employer", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (data.access_token && data.user) {
+    setSession(data.access_token, data.user);
+  }
+  return data;
+}
+
+export async function uploadDocument(document_ref: string, document_type: string = "degree_certificate", notes?: string) {
+  return apiFetch("/api/v1/verification/upload-document", {
+    method: "POST",
+    body: JSON.stringify({ document_ref, document_type, notes }),
+  });
+}
+
+export async function requestPeerVouches(voucher_emails: string[], message?: string) {
+  return apiFetch("/api/v1/verification/request-peer-vouches", {
+    method: "POST",
+    body: JSON.stringify({ voucher_emails, message }),
+  });
+}
+
+export async function respondPeerVouch(vouch_id: string, action: "approve" | "reject", comment?: string) {
+  return apiFetch("/api/v1/verification/respond-peer-vouch", {
+    method: "POST",
+    body: JSON.stringify({ vouch_id, action, comment }),
+  });
+}
+
+export async function fetchVerificationStatus() {
+  return apiFetch("/api/v1/verification/status");
+}
+
+export async function fetchVerificationQueue() {
+  return apiFetch("/api/v1/admin/verification-queue");
+}
+
+export async function adminVerifyAction(request_id: string, action: "approve" | "reject", reason: string) {
+  return apiFetch("/api/v1/admin/verify-action", {
+    method: "POST",
+    body: JSON.stringify({ request_id, action, reason }),
+  });
+}
+
+export async function previewRosterCsv(csv_content: string) {
+  return apiFetch("/api/v1/admin/roster/preview", {
+    method: "POST",
+    body: JSON.stringify({ csv_content }),
+  });
+}
+
+export async function uploadRosterCsv(institution_id: number, csv_content: string, replace_existing: boolean = false) {
+  return apiFetch("/api/v1/admin/roster/upload", {
+    method: "POST",
+    body: JSON.stringify({ institution_id, csv_content, replace_existing }),
+  });
+}
+
+export async function createOpportunity(payload: any) {
+  return apiFetch("/api/v1/opportunities", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+

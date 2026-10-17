@@ -84,10 +84,18 @@ class User(Base):
     institution_id = Column(Integer, ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True)
     verification_level = Column(String(50), nullable=False, default="pending")  # pending, verified_alumnus, verified_professional, trusted, verified_employer
     trust_score = Column(Float, nullable=False, default=50.0)
+    batch = Column(Integer, nullable=True)
+    branch = Column(String(100), nullable=True)
+    company = Column(String(255), nullable=True)
+    cin = Column(String(50), nullable=True)
+    gstin = Column(String(50), nullable=True)
+    last_verified_at = Column(DateTime(timezone=True), nullable=True)
+    next_reverification_at = Column(DateTime(timezone=True), nullable=True)
     consent_flags = Column(JSON, nullable=False, default=lambda: {"data_processing": True, "profile_visible": True, "dpdp_accepted": True})
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
 
     institution = relationship("Institution", back_populates="users")
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
@@ -446,3 +454,66 @@ class Embedding(Base):
     entity_id = Column(Uuid(as_uuid=True), index=True, nullable=False)
     embedding = Column(VectorFallbackType(768), nullable=True)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+# 26. Institution Alumni CSV Roster (F2)
+class AlumniRosterRecord(Base):
+    __tablename__ = "alumni_roster_records"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    institution_id = Column(Integer, ForeignKey("institutions.id", ondelete="CASCADE"), index=True, nullable=False)
+    email = Column(String(255), index=True, nullable=False)
+    full_name = Column(String(255), nullable=False)
+    batch = Column(Integer, index=True, nullable=False)
+    branch = Column(String(100), nullable=True)
+    roll_number = Column(String(100), nullable=True)  # Strictly private, never shown publicly
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+# 27. Email OTP Verification (F2, F5)
+class EmailOTP(Base):
+    __tablename__ = "email_otps"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), index=True, nullable=False)
+    otp_code = Column(String(10), nullable=False)
+    purpose = Column(String(50), default="alumni_registration", nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    is_verified = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+# 28. Verification Requests / Moderation Queue (F2, F3)
+class VerificationRequest(Base):
+    __tablename__ = "verification_requests"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    institution_id = Column(Integer, ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True)
+    request_type = Column(String(50), nullable=False)  # csv_auto, document_review, peer_vouch, employer_cin_gst
+    document_ref = Column(String(500), nullable=True)
+    document_type = Column(String(100), nullable=True)  # degree_certificate, college_id
+    company_name = Column(String(255), nullable=True)
+    cin = Column(String(50), nullable=True)
+    gstin = Column(String(50), nullable=True)
+    status = Column(String(50), default="pending", nullable=False)  # pending, approved, rejected
+    reviewed_by = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    review_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# 29. Peer Vouching Requests (F2)
+class PeerVouchRequest(Base):
+    __tablename__ = "peer_vouch_requests"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    applicant_id = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    voucher_id = Column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    batch = Column(Integer, nullable=False)
+    branch = Column(String(100), nullable=True)
+    status = Column(String(50), default="pending", nullable=False)  # pending, approved, rejected
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+

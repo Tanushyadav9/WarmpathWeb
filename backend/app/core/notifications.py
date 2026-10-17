@@ -17,21 +17,24 @@ async def create_notification(
     title: str,
     message: str,
     type: str = "system",
+    notif_type: Optional[str] = None,
     data: Optional[Dict[str, Any]] = None,
 ) -> Notification:
     """
     Creates and persists a notification for a user.
     Types: 'request', 'session', 'verification', 'system', 'credit', 'report'
     """
+    actual_type = notif_type or type
     notification = Notification(
         id=uuid.uuid4(),
         user_id=user_id,
         title=title,
         message=message,
-        type=type,
+        type=actual_type,
         data=data or {},
         is_read=False,
     )
+
     db.add(notification)
     await db.commit()
     await db.refresh(notification)

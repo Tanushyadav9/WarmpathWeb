@@ -135,7 +135,12 @@ from app.core.models import (  # noqa: E402, F401
     Notification,
     AuditLog,
     Embedding,
+    AlumniRosterRecord,
+    EmailOTP,
+    VerificationRequest,
+    PeerVouchRequest,
 )
+
 
 
 async def get_db() -> AsyncGenerator[Any, None]:
@@ -164,10 +169,15 @@ def get_db_session_context():
         return async_session_factory()
 
 
-async def init_db() -> None:
-    """Create all tables if they do not exist."""
+async def init_db(force_recreate: bool = False) -> None:
+    """Create all tables if they do not exist (or recreate if force_recreate is True)."""
     if is_sqlite:
+        if force_recreate:
+            Base.metadata.drop_all(engine)
         Base.metadata.create_all(engine)
     else:
         async with engine.begin() as conn:
+            if force_recreate:
+                await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
+

@@ -43,7 +43,12 @@ from app.core.models import (
     User,
     UserSkill,
     Vouch,
+    AlumniRosterRecord,
+    EmailOTP,
+    VerificationRequest,
+    PeerVouchRequest,
 )
+
 from app.core.security import hash_password
 
 
@@ -57,13 +62,14 @@ DEFAULT_PASSWORD = "demo1234"
 async def run_seed(session: Optional[Any] = None) -> None:
     """Wipes and seeds the database with rich, realistic benchmark data."""
     if session is None:
-        await init_db()
+        await init_db(force_recreate=True)
         from app.core.db import get_db_session_context
         db = get_db_session_context()
         try:
             await _seed_data(db)
         finally:
             await db.close()
+
     else:
         await _seed_data(session)
 
@@ -76,8 +82,11 @@ async def _seed_data(db: AsyncSession) -> None:
         AuditLog, Notification, Report, ScamRule, Vouch, Rating,
         Session, RequestMessage, Request, CreditLedger, CreditWallet,
         Opportunity, UserSkill, Skill, Resume, Capacity, Availability,
-        GiverProfile, StudentProfile, User, Institution
+        GiverProfile, StudentProfile,
+        PeerVouchRequest, VerificationRequest, EmailOTP, AlumniRosterRecord,
+        User, Institution
     ]:
+
         try:
             await db.execute(delete(model))
         except Exception:
@@ -114,6 +123,67 @@ async def _seed_data(db: AsyncSession) -> None:
     institutions = [Institution(**data) for data in institutions_data]
     db.add_all(institutions)
     await db.commit()
+
+    print("[+] Seeding Institution Alumni CSV Rosters...")
+    roster_records = [
+        AlumniRosterRecord(
+            id=uuid.uuid4(),
+            institution_id=1,
+            email="vikram.malhotra@alumni.iiitd.ac.in",
+            full_name="Vikram Malhotra",
+            batch=2021,
+            branch="Computer Science",
+            roll_number="2017001",
+        ),
+        AlumniRosterRecord(
+            id=uuid.uuid4(),
+            institution_id=1,
+            email="rohan.gupta@alumni.iiitd.ac.in",
+            full_name="Rohan Gupta",
+            batch=2021,
+            branch="Computer Science",
+            roll_number="2017089",
+        ),
+        AlumniRosterRecord(
+            id=uuid.uuid4(),
+            institution_id=1,
+            email="sneha.patel@alumni.iiitd.ac.in",
+            full_name="Sneha Patel",
+            batch=2020,
+            branch="Electronics & Communication",
+            roll_number="2016045",
+        ),
+        AlumniRosterRecord(
+            id=uuid.uuid4(),
+            institution_id=1,
+            email="ananya.roy@alumni.iiitd.ac.in",
+            full_name="Ananya Roy",
+            batch=2022,
+            branch="Computer Science",
+            roll_number="2018112",
+        ),
+        AlumniRosterRecord(
+            id=uuid.uuid4(),
+            institution_id=1,
+            email="tanmay.bhatia@alumni.iiitd.ac.in",
+            full_name="Tanmay Bhatia",
+            batch=2021,
+            branch="Computer Science",
+            roll_number="2017234",
+        ),
+        AlumniRosterRecord(
+            id=uuid.uuid4(),
+            institution_id=1,
+            email="nikhil.aggarwal@alumni.iiitd.ac.in",
+            full_name="Nikhil Aggarwal",
+            batch=2020,
+            branch="Computer Science",
+            roll_number="2016045",
+        ),
+    ]
+    db.add_all(roster_records)
+    await db.commit()
+
 
     print("[+] Seeding Core Skills Taxonomy...")
     skills_list = [
@@ -210,10 +280,14 @@ async def _seed_data(db: AsyncSession) -> None:
         role="alumni",
         roles=["alumni"],
         institution_id=1,
+        batch=2021,
+        branch="Computer Science",
+        company="Google",
         verification_level="trusted",
         trust_score=95.0,
         is_active=True,
     )
+
     db.add(demo_alumni)
     await db.flush()
 
@@ -458,6 +532,7 @@ async def _seed_data(db: AsyncSession) -> None:
             rating = round(random.uniform(4.70, 5.0), 2)
 
         avail_status = random.choice(["active_now", "available_today", "inactive"])
+        batch_year = random.choice([2019, 2020, 2021, 2022, 2023])
 
         alumni_user = User(
             id=uuid.uuid4(),
@@ -467,10 +542,14 @@ async def _seed_data(db: AsyncSession) -> None:
             role="alumni",
             roles=["alumni"],
             institution_id=inst_id,
+            batch=batch_year,
+            branch="Computer Science",
+            company=comp,
             verification_level="trusted" if band == "top_rated" else "verified_alumnus",
             trust_score=round(random.uniform(70.0, 98.0), 1),
             is_active=True,
         )
+
         db.add(alumni_user)
         await db.flush()
 
@@ -790,6 +869,18 @@ async def _seed_data(db: AsyncSession) -> None:
         company="Atlassian",
         role_title="Senior DevOps Engineer",
     ))
+    db.add(VerificationRequest(
+
+        id=uuid.uuid4(),
+        user_id=pending_alumnus.id,
+        institution_id=1,
+        request_type="document_review",
+        document_ref="degree_kavita_saxena_2020.pdf",
+        document_type="degree_certificate",
+        status="pending",
+        review_notes="Degree certificate uploaded by applicant. Match pending admin review against archived roll sheets.",
+    ))
+
 
     # Moderation report
     db.add(Report(

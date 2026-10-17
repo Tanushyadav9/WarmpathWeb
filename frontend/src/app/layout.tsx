@@ -75,7 +75,14 @@ export default function RootLayout({
                 >
                   Sign In
                 </Link>
+                <Link
+                  href="/register"
+                  className="text-xs font-semibold bg-teal-600 hover:bg-teal-700 text-white px-3 py-1.5 rounded-lg shadow-2xs transition-all"
+                >
+                  Register
+                </Link>
               </div>
+
             </div>
           </div>
         </header>
