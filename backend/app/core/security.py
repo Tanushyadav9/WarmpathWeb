@@ -1,31 +1,65 @@
 """
 backend/app/core/security.py - Security, password hashing, and JWT tokens.
+Supports Argon2 with seamless, secure PBKDF2-HMAC-SHA256 standard library fallback.
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import os
 from typing import Any, Dict, Optional
 import jwt
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 
 from app.core.config import settings
 from app.core.errors import AppError
 
-ph = PasswordHasher()
-
 
 def hash_password(password: str) -> str:
-    return ph.hash(password)
+    """Hash password using Argon2 if available, or secure PBKDF2-HMAC-SHA256."""
+    try:
+        from argon2 import PasswordHasher
+        ph = PasswordHasher()
+        return ph.hash(password)
+    except ImportError:
+        salt = os.urandom(16).hex()
+        pwd_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            100_000,
+        ).hex()
+        return f"pbkdf2:sha256:{salt}:{pwd_hash}"
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify password against hashed string."""
+    if hashed_password.startswith("pbkdf2:sha256:"):
+        try:
+            _, _, salt, expected_hash = hashed_password.split(":")
+            calc_hash = hashlib.pbkdf2_hmac(
+                "sha256",
+                plain_password.encode("utf-8"),
+                salt.encode("utf-8"),
+                100_000,
+            ).hex()
+            return hmac.compare_digest(expected_hash, calc_hash)
+        except Exception:
+            return False
+
     try:
+        from argon2 import PasswordHasher
+        from argon2.exceptions import VerifyMismatchError
+        ph = PasswordHasher()
         return ph.verify(hashed_password, plain_password)
-    except VerifyMismatchError:
+    except Exception:
         return False
 
 
-def create_access_token(subject: str, claims: Optional[Dict[str, Any]] = None, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(
+    subject: str,
+    claims: Optional[Dict[str, Any]] = None,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
     now = datetime.now(timezone.utc)
     if expires_delta:
         expire = now + expires_delta

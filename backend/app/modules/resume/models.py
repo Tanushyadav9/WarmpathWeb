@@ -44,16 +44,7 @@ class SkillTaxonomy(Base):
     aliases = Column(ARRAY(String), default=list, nullable=False)
 
 
-class StudentProfile(Base):
-    __tablename__ = "student_profiles"
-
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    raw_text = Column(Text, nullable=True)
-    resume_file_path = Column(String(500), nullable=True)
-    parsed = Column(JSONB, nullable=True)
-    edited = Column(JSONB, nullable=True)
-    embedding = Column(Vector(768), nullable=True)
-    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+from app.core.models import StudentProfile
 
 
 class StudentIntent(Base):
