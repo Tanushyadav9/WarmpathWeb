@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.core.db import async_session_maker, OutboxEvent
 from app.core.errors import AppError
 from app.core.ports import CreditsPort
+from app.modules.auth.models import FinancialAuditLog
 from app.modules.credits.models import (
     CreditLedger,
     SessionEscrow,
@@ -110,6 +111,26 @@ class CreditsService:
                 created_at=now,
             )
             db.add(ledger_entry)
+
+        # Financial Audit Log for money actions
+        actor_user_id = next((e.get("user_id") for e in entries if e.get("user_id") is not None), None)
+        max_amount = max(abs(e["amount"]) for e in entries) if entries else 0
+        db.add(
+            FinancialAuditLog(
+                user_id=actor_user_id,
+                action=operation,
+                amount=str(max_amount),
+                reference_id=reference_id,
+                idempotency_key=idempotency_key,
+                metadata_json={
+                    "transaction_id": str(transaction_id),
+                    "operation": operation,
+                    "entries_count": len(entries),
+                    "net_sum": net_sum,
+                },
+                created_at=now,
+            )
+        )
 
     async def get_plans(self) -> List[PlanResponse]:
         return [PlanResponse(**p) for p in PLANS]

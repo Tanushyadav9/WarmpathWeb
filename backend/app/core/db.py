@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator, List, Optional
 
-from sqlalchemy import ARRAY, Column, DateTime, ForeignKey, Integer, String, Text, JSON, CHAR
+from sqlalchemy import ARRAY, Boolean, Column, DateTime, ForeignKey, Integer, String, Text, JSON, CHAR
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -89,10 +89,15 @@ class User(Base):
 
     id = Column(PG_UUID, primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=True)
     full_name = Column(String(255), nullable=False)
+    role = Column(String(50), default="student", nullable=False)
     institution_id = Column(Integer, ForeignKey("institutions.id"), nullable=True)
     roles = Column(PG_ARRAY, nullable=False, default=lambda: ["student"])
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     institution = relationship("Institution", back_populates="users")
 

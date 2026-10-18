@@ -1,6 +1,7 @@
 """Pydantic schemas for sessions, request lifecycle, chat, and scheduling."""
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from app.core.sanitization import sanitize_text
 
 
 class CreateRequestInput(BaseModel):
@@ -8,6 +9,19 @@ class CreateRequestInput(BaseModel):
     intent: str = Field(..., description="Student intent / goal for mentorship")
     notes: Optional[str] = Field(None, description="Additional context or questions")
     is_free: bool = Field(True, description="True for own-college free session, False for paid credit")
+
+    @field_validator("intent")
+    @classmethod
+    def sanitize_intent(cls, v: str) -> str:
+        cleaned = sanitize_text(v)
+        if not cleaned:
+            raise ValueError("Intent cannot be empty after sanitization")
+        return cleaned
+
+    @field_validator("notes")
+    @classmethod
+    def sanitize_notes(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_text(v) if v else None
 
 
 class DeclineRequestInput(BaseModel):
@@ -33,6 +47,14 @@ class NoShowReportInput(BaseModel):
 
 class MessageCreateInput(BaseModel):
     body: str = Field(..., min_length=1, max_length=2000, description="Chat message body")
+
+    @field_validator("body")
+    @classmethod
+    def sanitize_message_body(cls, v: str) -> str:
+        cleaned = sanitize_text(v)
+        if not cleaned:
+            raise ValueError("Message body cannot be empty after sanitization")
+        return cleaned
 
 
 class MessageResponse(BaseModel):

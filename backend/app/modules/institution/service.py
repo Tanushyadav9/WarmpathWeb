@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import OutboxEvent
 from app.core.errors import AppError
+from app.modules.auth.models import FinancialAuditLog
 from app.modules.availability.models import AvailabilityNotification, GiverAvailability
 from app.modules.institution.models import AdminAuditLog, College, IncidentLog, Report, SessionOutcome, VerificationRecord
 from app.modules.institution.schemas import (
@@ -660,6 +661,59 @@ class InstitutionService:
             )
         )
         await db.commit()
+
+    async def list_audit_logs(
+        self, db: AsyncSession, target_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Lists audit logs for admin decisions and financial money movements."""
+        results: List[Dict[str, Any]] = []
+
+        if target_type == "financial":
+            res = await db.execute(select(FinancialAuditLog).order_by(FinancialAuditLog.created_at.desc()))
+            for f in res.scalars().all():
+                results.append({
+                    "id": str(f.id),
+                    "action": f.action,
+                    "target_type": "financial",
+                    "target_id": f.reference_id or str(f.id),
+                    "amount": f.amount,
+                    "user_id": str(f.user_id) if f.user_id else None,
+                    "metadata": f.metadata_json,
+                    "created_at": f.created_at.isoformat(),
+                })
+        else:
+            q = select(AdminAuditLog)
+            if target_type:
+                q = q.where(AdminAuditLog.target_type == target_type.lower())
+            q = q.order_by(AdminAuditLog.created_at.desc())
+            res = await db.execute(q)
+            for a in res.scalars().all():
+                results.append({
+                    "id": str(a.id),
+                    "admin_id": str(a.admin_id),
+                    "action": a.action,
+                    "target_type": a.target_type,
+                    "target_id": a.target_id,
+                    "reason": a.reason,
+                    "metadata": a.metadata_json,
+                    "created_at": a.created_at.isoformat(),
+                })
+            if not target_type:
+                res_f = await db.execute(select(FinancialAuditLog).order_by(FinancialAuditLog.created_at.desc()))
+                for f in res_f.scalars().all():
+                    results.append({
+                        "id": str(f.id),
+                        "action": f.action,
+                        "target_type": "financial",
+                        "target_id": f.reference_id or str(f.id),
+                        "amount": f.amount,
+                        "user_id": str(f.user_id) if f.user_id else None,
+                        "metadata": f.metadata_json,
+                        "created_at": f.created_at.isoformat(),
+                    })
+                results.sort(key=lambda x: x["created_at"], reverse=True)
+
+        return results
 
     # --- 5. Trust Layers Page with Live Counts ---
 

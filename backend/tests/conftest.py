@@ -22,6 +22,7 @@ import app.modules.trust.models
 import app.modules.ratings.models
 import app.modules.credits.models
 import app.modules.institution.models
+import app.modules.auth.models
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

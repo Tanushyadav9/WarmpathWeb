@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -24,11 +24,17 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://warmpath:secretpassword@localhost:5432/warmpath_db"
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Authentication & Security
+    # Authentication & Security Hardening
     JWT_SECRET: str = "warmpath-jwt-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_MINUTES: int = 60
     REFRESH_TOKEN_DAYS: int = 30
+    CSRF_SECRET: str = "warmpath-csrf-secret-key-change-in-production"
+    SECURITY_HEADERS_ENABLED: bool = True
+    CSRF_PROTECTION_ENABLED: bool = True
+    MAX_UPLOAD_SIZE_BYTES: int = 5 * 1024 * 1024  # 5 MB max file upload
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 5
+    RATE_LIMIT_API_PER_MINUTE: int = 100
 
     # SMTP (Email OTP)
     SMTP_HOST: str = "localhost"

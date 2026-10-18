@@ -1,9 +1,10 @@
 import uuid
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
+from app.core.file_upload import validate_and_read_file
 from app.core.security import get_current_user_id
 from app.modules.institution.schemas import (
     DashboardOverviewResponse,
@@ -161,6 +162,14 @@ async def post_admin_giver_suspend(
     return {"message": "Giver suspended successfully and removed from matching", "giver_id": id}
 
 
+@router.get("/admin/audit-logs", summary="List immutable audit logs for administrative actions and financial money transactions")
+async def get_admin_audit_logs(
+    target_type: Optional[str] = Query(None, description="Filter by target type ('report', 'verification', 'giver', 'college', 'user', 'financial')"),
+    db: AsyncSession = Depends(get_db),
+):
+    return await institution_service.list_audit_logs(db, target_type=target_type)
+
+
 # --- 4. Trust Layers Page ---
 
 @router.get("/admin/trust-layers", response_model=TrustLayersResponse, summary="List the 7 defensive trust layers with live operational counts")
@@ -262,4 +271,23 @@ async def get_admin_colleges(
     db: AsyncSession = Depends(get_db),
 ):
     return await institution_service.list_colleges(db)
+
+
+@router.post("/verification/upload", summary="Secure document upload for verification with file type and size inspection")
+async def post_verification_upload(
+    file: UploadFile = File(...),
+):
+    content, filename, mime_type = await validate_and_read_file(
+        file=file,
+        allowed_mimes=["application/pdf", "image/png", "image/jpeg"],
+    )
+    doc_id = uuid.uuid4().hex[:12]
+    return {
+        "status": "uploaded",
+        "document_url": f"https://warmpath.internal/docs/{doc_id}_{filename}",
+        "filename": filename,
+        "size_bytes": len(content),
+        "mime_type": mime_type,
+    }
+
 

@@ -12,13 +12,27 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from app.core.config import settings
-from app.core.errors import AppError, app_error_handler
+from app.core.errors import (
+    AppError,
+    app_error_handler,
+    http_exception_handler,
+    unhandled_exception_handler,
+    validation_exception_handler,
+)
 from app.core.events import event_bus
 from app.core.health import router as health_router
 from app.core.logging import RequestIdMiddleware, setup_logging
 from app.core.ports import ports
 from app.core.redis import close_redis
+from app.core.security_middleware import (
+    CSRFProtectionMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 
 
 @asynccontextmanager
@@ -35,7 +49,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Global Middlewares
+# Global Security & Utility Middlewares
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(CSRFProtectionMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -45,10 +62,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Exception Handlers
+# Contract Error Handlers (Never Leaks Stack Traces)
 app.add_exception_handler(AppError, app_error_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
-# Health & Readiness
+# Health & Readiness Probes
 app.include_router(health_router)
 
 # Module Auto-Discovery
