@@ -314,6 +314,24 @@ class CreditsService:
         if prof and prof.college:
             return prof.college
 
+        # 3. Check FacultyProfile
+        from app.modules.matching.models import FacultyProfile
+        res_fac = await db.execute(
+            select(FacultyProfile).where(FacultyProfile.user_id == user_id)
+        )
+        fac = res_fac.scalar_one_or_none()
+        if fac and fac.institution:
+            return fac.institution
+
+        # 4. Check StudentProfile
+        from app.modules.matching.models import StudentProfile
+        res_stu = await db.execute(
+            select(StudentProfile).where(StudentProfile.user_id == user_id)
+        )
+        stu = res_stu.scalar_one_or_none()
+        if stu and stu.college:
+            return stu.college
+
         return None
 
     async def set_user_affiliation(self, db: AsyncSession, user_id: uuid.UUID, college: str) -> None:
@@ -337,6 +355,25 @@ class CreditsService:
     async def can_access(
         self, db: AsyncSession, student_id: uuid.UUID, giver_id: uuid.UUID
     ) -> Dict[str, Any]:
+        # 1. Check if giver is a Faculty domain mentor with custom credit rate
+        from app.modules.matching.models import FacultyProfile
+        res_fac = await db.execute(
+            select(FacultyProfile).where(FacultyProfile.user_id == giver_id)
+        )
+        fac = res_fac.scalar_one_or_none()
+        if fac and fac.rate_credits is not None:
+            wallet = await self.get_or_create_wallet(db, student_id)
+            cost = fac.rate_credits
+            allowed = (wallet.available_balance >= cost) or (cost == 0)
+            return {
+                "allowed": allowed,
+                "reason": f"Faculty domain mentorship costs {cost} credits." if allowed else f"Faculty domain mentorship requires {cost} credits.",
+                "plan": "faculty_mentor",
+                "cost": cost,
+                "is_same_college": False,
+                "is_sponsored": False,
+            }
+
         student_college = await self.get_user_college(db, student_id)
         giver_college = await self.get_user_college(db, giver_id)
 
