@@ -64,6 +64,21 @@ class JuryDemoService:
         """One-click atomic reset restoring clean initial state for the 8-step story."""
         self.step_status = {i: False for i in range(1, 9)}
 
+        # 0. Ensure all tables exist before deletion
+        from app.core.db import Base, engine
+        from app.core.security import hash_password
+        import app.modules.auth.models
+        import app.modules.availability.models
+        import app.modules.credits.models
+        import app.modules.institution.models
+        import app.modules.matching.models
+        import app.modules.ratings.models
+        import app.modules.sessions.models
+        import app.modules.trust.models
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
         # 1. Clean existing records associated with demo IDs
         await db.execute(delete(MentorshipMessage))
         await db.execute(delete(SessionBooking))
@@ -88,11 +103,13 @@ class JuryDemoService:
         await db.commit()
 
         # 2. Seed Clean Baseline Users
+        demo_hashed = hash_password("DemoPassword123!")
         users = [
             User(
                 id=DEMO_STUDENT_ID,
                 email="aditi.sharma@iiitd.ac.in",
                 full_name="Aditi Sharma",
+                hashed_password=demo_hashed,
                 role="student",
                 is_active=True,
                 is_verified=True,
@@ -101,6 +118,7 @@ class JuryDemoService:
                 id=DEMO_GIVER_SAME_ID,
                 email="rohan.sharma@microsoft.com",
                 full_name="Rohan Sharma",
+                hashed_password=demo_hashed,
                 role="alumnus",
                 is_active=True,
                 is_verified=True,
@@ -109,6 +127,7 @@ class JuryDemoService:
                 id=DEMO_GIVER_CROSS_ID,
                 email="priya.patel@google.com",
                 full_name="Priya Patel",
+                hashed_password=demo_hashed,
                 role="alumnus",
                 is_active=True,
                 is_verified=True,
@@ -117,6 +136,7 @@ class JuryDemoService:
                 id=DEMO_FACULTY_ID,
                 email="vivek.kumar@iiitd.ac.in",
                 full_name="Dr. Vivek Kumar",
+                hashed_password=demo_hashed,
                 role="faculty",
                 is_active=True,
                 is_verified=True,
@@ -125,6 +145,7 @@ class JuryDemoService:
                 id=DEMO_RECRUITER_ID,
                 email="neha.verma@zomato.com",
                 full_name="Neha Verma",
+                hashed_password=demo_hashed,
                 role="recruiter",
                 is_active=True,
                 is_verified=True,
@@ -133,6 +154,7 @@ class JuryDemoService:
                 id=DEMO_ADMIN_ID,
                 email="career.admin@iiitd.ac.in",
                 full_name="IIIT Delhi Career Office",
+                hashed_password=demo_hashed,
                 role="admin",
                 is_active=True,
                 is_verified=True,

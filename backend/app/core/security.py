@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from fastapi import Request
 
 from app.core.config import settings
 from app.core.errors import AppError
@@ -68,4 +69,29 @@ def get_current_user_id(request: Request) -> str:
         return user_header
 
     return DEFAULT_DEMO_USER_ID
+
+
+def get_current_user_claims(request: Request) -> Dict[str, Any]:
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        return decode_token(token)
+    return {}
+
+
+def require_role(*allowed_roles: str):
+    def role_checker(request: Request):
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+            claims = decode_token(token)
+            user_role = claims.get("role")
+            if user_role and user_role not in allowed_roles:
+                raise AppError(
+                    code="access_denied",
+                    message=f"Access denied for role: {user_role}. Required: {', '.join(allowed_roles)}",
+                    status_code=403,
+                )
+        return True
+    return role_checker
 

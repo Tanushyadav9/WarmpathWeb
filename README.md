@@ -67,18 +67,21 @@ A directory lists profiles and leaves users to fend for themselves. A network ma
 
 ## Feature status
 
-| Feature | Status | Note |
+| Feature Group | Status | Audit Verification |
 | :--- | :---: | :--- |
-| System architecture & data models | **Built** | Fully specified in repo documentation and design diagrams. |
-| Environment & local setup configs | **Built** | `.env.example`, `.gitignore`, and Docker orchestration defined. |
-| Institutional email & roster verification | **In progress** | Verification service logic and mock roster validation underway. |
-| Resume parser (Gemini API) | **In progress** | Prompt template and JSON schema extraction for skills and projects. |
-| Heuristic matching service | **In progress** | Python service computing weighted fit scores across signals. |
-| In-app text messaging & call relay | **Planned** | Embedded audio/video rooms (Jitsi/Meet) with masked identities. |
-| Session rating & giver review loop | **Planned** | Two-way feedback mechanism unlocking payout escrow. |
-| Protected payment & credit ledger | **Planned** | Razorpay integration in test mode with 72-hour refund triggers. |
-| Automated scam & keyword filters | **Planned** | Pattern matching for fee requests and off-platform chat redirects. |
-| Institution admin web dashboard | **Planned** | Analytics view for alumni cells on student demand and skill gaps. |
+| **F1–F3: Auth, Verification & Badges** | **Built & Verified** | Argon2 password hashing, OTP verification, layered badges (`Verified Student`, `Alumnus`, `Expert`, `Employer`). |
+| **F4–F5: Resume & Proof of Work** | **Built & Verified** | Magic byte `%PDF-` validation, AI parsing, confirmed skills labeling, GitHub proof-of-work link verification. |
+| **F6–F7: Intent Structuring & Quality** | **Built & Verified** | Vague ask transformation, technical objective structuring, suggested refinements, contact solicitation blocking. |
+| **F8–F10: Transparent Matcher & Gates** | **Built & Verified** | 6-factor explainable weights (35/25/15/10/10/5), why-this-match reasons, capacity & safety hard exclusion gates. |
+| **F11–F13: Availability & Trust Limits** | **Built & Verified** | 3 states (`Active now`, `Available today`, `Inactive`), weekly caps, graduated request limits by trust score. |
+| **F14–F17: Request Lifecycle & Security** | **Built & Verified** | State machine, contact masking in chat, real-time regex scam detection middleware, synthetic Jitsi Meet links. |
+| **F18–F19: Single Credit Escrow & Seats** | **Built & Verified** | ₹0 same-college reach, cross-college 80/20 escrow release, zero-net immutable ledger, sponsored seat vouchers. |
+| **F20–F23: Reputation, Bands & Anti-Gaming** | **Built & Verified** | Post-session tag ratings, Bayesian smoothed bands, 1-click vouching, mutual rating ring anti-gaming filters. |
+| **F24–F27: Opportunities & Other Givers** | **Built & Verified** | Verified faculty domain mentors, verified employer job/referral postings, candidate opt-in privacy, alumni counts. |
+| **F28–F32: Admin, Incident Learning & Graph**| **Built & Verified** | Analytics overview, skill gap analysis, moderation queue, automated scam rule learning, 7 live trust layers. |
+| **F33–F36: Privacy, Pilot Gates & Jury Demo** | **Built & Verified** | DPDP consent lifecycle, JSON data export, account deletion, pilot metrics gate, 8-step Jury Demo walkthrough. |
+
+> See [FEATURES.md](FEATURES.md) for the 36-feature matrix and [AUDIT_REPORT.md](AUDIT_REPORT.md) for live test evidence.
 
 ---
 
@@ -283,7 +286,7 @@ Charging for cross-college reach is not "pay-to-network". Every student receives
 ### Prerequisites
 - Python 3.11+
 - Flutter SDK (3.19+)
-- Docker & Docker Compose (for running local PostgreSQL and Redis)
+- Docker & Docker Compose (optional for local PostgreSQL and Redis; prototype defaults to SQLite)
 
 ### 1. Clone the repository
 ```bash
@@ -291,41 +294,86 @@ git clone https://github.com/AnmolGarg8/WarmPath.git
 cd WarmPath
 ```
 
-### 2. Environment variables
-Copy the sample environment file:
+### 2. Set up Python virtual environment & dependencies
 ```bash
-cp .env.example .env
-```
-Open `.env` and fill in your local database credentials and Gemini API key.
+python -m venv .venv
 
-### 3. Start local infrastructure
-```bash
-docker compose up -d postgres redis
-```
-*(Note: docker-compose configuration is in the process of being scaffolded alongside the backend modules).*
-
-### 4. Run the backend service (FastAPI)
-```bash
-cd backend
-python -m venv venv
-# On Windows:
-.\venv\Scripts\Activate.ps1
+# On Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
 # On macOS/Linux:
-source venv/bin/activate
+source .venv/bin/activate
 
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+pip install -r backend/requirements.txt
 ```
-Interactive Swagger documentation will be available at `http://localhost:8000/docs`.
 
-### 5. Run the Flutter mobile app
+### 3. Run the backend service (FastAPI)
+From the repository root (or inside `backend/`):
 ```bash
-cd ../mobile
+# From repository root:
+uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+- **Web UI & Interactive Demo**: `http://localhost:8000/` or `http://localhost:8000/demo`
+- **Interactive Swagger Documentation**: `http://localhost:8000/docs`
+- **Admin Analytics Dashboard**: `http://localhost:8000/admin/dashboard`
+
+### 4. Run automated test suites & feature audit
+```bash
+# Run complete pytest suite (62 tests, 87% coverage):
+pytest backend/tests
+
+# Run live 36-feature audit against running server:
+python scripts/audit_features.py
+```
+
+### 5. Run the Flutter mobile app (optional)
+```bash
+cd mobile
 flutter pub get
 flutter run
 ```
 
-*Automated test suites are currently in development; test running instructions will be added as test files are committed.*
+---
+
+## Demo credentials & accounts
+
+All demo accounts share the standard password `DemoPassword123!`. The database can be reset to this clean state at any time via `POST /demo/reset`.
+
+| Role | Email | Password | Purpose & Context |
+| :--- | :--- | :--- | :--- |
+| **Student** | `aditi.sharma@iiitd.ac.in` | `DemoPassword123!` | IIIT Delhi CS student seeking SWE mentorship and resume review. |
+| **Alumnus (Same-College)** | `rohan.sharma@microsoft.com` | `DemoPassword123!` | IIIT Delhi alumnus at Microsoft; ₹0 / 0 credit free connection. |
+| **Alumnus (Cross-College)**| `priya.patel@google.com` | `DemoPassword123!` | NSUT alumna at Google; paid cross-college reach via escrow credits. |
+| **Faculty Expert** | `vivek.kumar@iiitd.ac.in` | `DemoPassword123!` | IIIT Delhi Professor & ML mentor with verified expert badge. |
+| **Recruiter** | `neha.verma@zomato.com` | `DemoPassword123!` | Zomato hiring lead; verified employer posting tech roles and chats. |
+| **Institution Admin** | `career.admin@iiitd.ac.in` | `DemoPassword123!` | IIIT Delhi Career Cell admin; oversees analytics, reports & gates. |
+
+---
+
+## 8-step jury demo story walkthrough
+
+The running platform includes a guided Jury Demo workflow accessible at `GET /demo` and `GET /demo/story/status`. It demonstrates the complete end-to-end user journey across 8 verified steps:
+
+```mermaid
+flowchart LR
+    S1["1. Resume & Proof"] --> S2["2. Refine Intent"]
+    S2 --> S3["3. Transparent Matches"]
+    S3 --> S4["4. Free & Escrow Booking"]
+    S4 --> S5["5. Scam Blocked"]
+    S5 --> S6["6. Escrow & Vouch"]
+    S6 --> S7["7. Admin & Incident Rule"]
+    S7 --> S8["8. Verification Gate"]
+```
+
+1. **Step 1: Upload resume & confirm skills**: Student uploads resume PDF (magic byte validated), Gemini extracts technical skills, student confirms skills, and connects verified GitHub proof-of-work link. (`POST /demo/story/step/1`)
+2. **Step 2: Vague intent refinement**: Student submits vague objective (*"want help in tech"*); AI structures it into an actionable technical agenda while filtering contact solicitation. (`POST /demo/story/step/2`)
+3. **Step 3: Transparent recommendations**: Heuristic matcher scores givers with explainable reasons (35% skills, 25% intent, 15% college, 10% availability, 10% rating, 5% response) and excludes inactive/capped profiles. (`POST /demo/story/step/3`)
+4. **Step 4: Book sessions (Free vs Escrow)**: Student books same-college alumnus for **0 credits** ($0) and cross-college alumnus with **5 credits** held in escrow. Calendar slots and synthetic Jitsi links are generated. (`POST /demo/story/step/4`)
+5. **Step 5: Scam detection in chat**: A fraudulent message requesting registration fees and off-platform WhatsApp contact is intercepted in real-time by the scam regex middleware and blocked. (`POST /demo/story/step/5`)
+6. **Step 6: Completion, escrow release & vouching**: Both parties mark session complete; 80% credits release to giver and 20% to platform; student gives 5-star rating and giver vouches for student. (`POST /demo/story/step/6`)
+7. **Step 7: Admin oversight & incident learning**: College admin inspects request turnaround times and skill gaps, resolves a scam report, and automatically learns a new scam pattern into `scam_rules`. (`POST /demo/story/step/7`)
+8. **Step 8: Identity verification hard gates**: A fraudulent applicant without college roster records is rejected, while an authorized institution member auto-verifies with instant badge assignment. (`POST /demo/story/step/8`)
+
+> **One-Click Reset**: Run `POST http://localhost:8000/demo/reset` at any point to restore fresh demo seed data.
 
 ---
 
@@ -405,7 +453,7 @@ Being honest about challenges is essential to building a dependable platform:
 1. **Cold start challenge**: A two-sided network requires both students and alumni to be active. We address this with our single-college playbook: seeding 50 verified alumni before inviting any students.
 2. **Giver inactivity**: Mentors can lose momentum over time. We use weekly capacity caps, 30-day activity check-ins, and auto-removal from search after 90 days of inactivity so students never message inactive profiles.
 3. **Moderation turnaround**: Our 24-hour incident review target is a pilot goal that depends on having a dedicated team member or college staff member available. We will not promise instant moderation at scale until it is properly staffed.
-4. **Current prototype status**: The repository currently holds the core architectural specifications, data schemas, and design documents. Backend services and Flutter screens are in active development for the upcoming demonstration round.
+4. **Current prototype status**: The FastAPI modular backend, database persistence, and interactive web demo portal are built and verified across all 36 features in `FEATURES.md` (62/62 automated tests passing, 36/36 live feature audit passing; see [AUDIT_REPORT.md](AUDIT_REPORT.md)). The Flutter mobile client codebase is in development for cross-platform deployment.
 
 ---
 

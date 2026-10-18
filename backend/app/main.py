@@ -38,6 +38,23 @@ from app.core.security_middleware import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    # Initialize DB schema
+    try:
+        from app.core.db import Base, engine
+        import app.modules.auth.models
+        import app.modules.availability.models
+        import app.modules.credits.models
+        import app.modules.institution.models
+        import app.modules.matching.models
+        import app.modules.ratings.models
+        import app.modules.sessions.models
+        import app.modules.trust.models
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn").warning(f"Database table sync notice: {e}")
     yield
     await close_redis()
 

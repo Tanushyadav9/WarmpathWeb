@@ -1,11 +1,11 @@
 import uuid
-from typing import List, Optional
+from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.file_upload import validate_and_read_file
-from app.core.security import get_current_user_id
+from app.core.security import get_current_user_id, require_role
 from app.modules.institution.schemas import (
     DashboardOverviewResponse,
     SkillGapItem,
@@ -35,6 +35,7 @@ router = APIRouter(tags=["institution"])
 async def get_admin_dashboard_overview(
     college: Optional[str] = Query(None, description="Optional college institution filter"),
     db: AsyncSession = Depends(get_db),
+    _role: Any = Depends(require_role("admin", "platform_admin", "institution_admin")),
 ):
     return await institution_service.get_dashboard_overview(db, college=college)
 
