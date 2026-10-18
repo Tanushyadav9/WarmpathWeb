@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import async_session_maker, OutboxEvent
+from app.core.errors import AppError
 from app.core.ports import ports, RatingsPort
 from app.modules.ratings.models import SessionRating
 from app.modules.ratings.schemas import RatingCreateInput, RatingResponse
@@ -16,7 +17,16 @@ class RatingsService:
     async def submit_rating(
         self, db: AsyncSession, session_id: uuid.UUID, rater_id: uuid.UUID, req: RatingCreateInput, giver_id: Optional[uuid.UUID] = None
     ) -> RatingResponse:
-        gid = giver_id or uuid.UUID("00000000-0000-0000-0000-000000000002")
+        session_info = await ports.sessions.get_session(str(session_id))
+        if not session_info:
+            raise AppError(code="session_not_found", message="Session not found", status_code=404)
+        if session_info.get("status") != "completed":
+            raise AppError(
+                code="session_not_completed",
+                message="A session cannot be rated before completion.",
+                status_code=400,
+            )
+        gid = giver_id or uuid.UUID(session_info["giver_id"])
         rating_obj = SessionRating(
             session_id=session_id,
             rater_id=rater_id,

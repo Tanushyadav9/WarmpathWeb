@@ -47,6 +47,10 @@ class SessionsPort(Protocol):
         """Marks a session request as rated by student"""
         ...
 
+    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Returns session details including status, student_id, giver_id, etc."""
+        ...
+
 
 
 @runtime_checkable
@@ -119,6 +123,9 @@ class DefaultSessionsPort(SessionsPort):
         raise PortNotReady("SessionsPort")
 
     async def mark_session_rated(self, session_id: str) -> None:
+        raise PortNotReady("SessionsPort")
+
+    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         raise PortNotReady("SessionsPort")
 
 

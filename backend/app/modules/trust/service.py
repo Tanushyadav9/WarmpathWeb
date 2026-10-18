@@ -1,13 +1,50 @@
-"""Business logic service and TrustPort implementation for trust."""
+"""Business logic service, TrustPort, and SafetyPort implementation for trust."""
+import re
 import uuid
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.db import async_session_maker
-from app.core.ports import ports, TrustPort
-from app.modules.trust.models import UserTrust
+from app.core.db import async_session_maker, OutboxEvent
+from app.core.ports import ports, TrustPort, SafetyPort
+from app.modules.trust.models import UserTrust, ScamRule, SafetyFlag
+
+# Regular expression detectors for contact details, payments, and scam phrases
+PHONE_REGEX = re.compile(
+    r'(?:(?:\+?91[\-\s]?)?[6-9]\d{9})|'           # 10 digits starting with 6-9 (Indian standard)
+    r'(?:\b\d{5}[\s\-]\d{5}\b)|'                  # 5-5 split digits
+    r'(?:\b\d{3}[\s\-]\d{3}[\s\-]\d{4}\b)|'       # standard 3-3-4
+    r'(?:\b\d{10}\b)',                             # 10 consecutive digits
+    re.IGNORECASE
+)
+EMAIL_REGEX = re.compile(
+    r'\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b',
+    re.IGNORECASE
+)
+URL_REGEX = re.compile(
+    r'(?:https?://[^\s]+)|(?:www\.[^\s]+)|(?:\b[a-zA-Z0-9.-]+\.(?:com|org|in|io|net|co|me|xyz|app)\b)',
+    re.IGNORECASE
+)
+SOCIAL_REGEX = re.compile(
+    r'(?:@[a-zA-Z0-9_]{3,})|'
+    r'(?:\b(?:telegram|whatsapp|wa\.me|t\.me|instagram|insta|linkedin|discord|snapchat)\b)',
+    re.IGNORECASE
+)
+PAYMENT_REGEX = re.compile(
+    r'(?:\b(?:send\s+money|upi|gpay|google\s*pay|phonepe|paytm|pay\s+me|transfer\s+money|crypto|bitcoin|advance\s+fee|processing\s+fee)\b)|'
+    r'(?:[\w.\-]+@(okhdfcbank|okaxis|oksbi|okicici|ybl|paytm|upi))',
+    re.IGNORECASE
+)
+OFF_PLATFORM_REGEX = re.compile(
+    r'\b(?:talk\s+outside|call\s+me\s+on|chat\s+on\s+whatsapp|dm\s+me|contact\s+me\s+at|reach\s+out\s+on)\b',
+    re.IGNORECASE
+)
+SCAM_PHRASES_REGEX = re.compile(
+    r'\b(?:guaranteed\s+job|pay\s+for\s+referral|fake\s+certificate|interview\s+proxy|direct\s+offer\s+without\s+interview|100%\s+placement)\b',
+    re.IGNORECASE
+)
 
 
 class TrustService:
@@ -127,6 +164,107 @@ class TrustService:
         }
 
 
+class SafetyService:
+    async def scan_text(
+        self, db: AsyncSession, text: str, sender_id: uuid.UUID, context: Optional[str] = None
+    ) -> Dict[str, Any]:
+        flags: List[str] = []
+        action = "allow"
+
+        # Regex detections
+        if PHONE_REGEX.search(text):
+            flags.append("phone_number")
+        if EMAIL_REGEX.search(text):
+            flags.append("email")
+        if URL_REGEX.search(text):
+            flags.append("url")
+        if SOCIAL_REGEX.search(text):
+            flags.append("social_handle")
+        if PAYMENT_REGEX.search(text):
+            flags.append("payment_request")
+        if SCAM_PHRASES_REGEX.search(text):
+            flags.append("scam_phrase")
+        if OFF_PLATFORM_REGEX.search(text):
+            flags.append("off_platform")
+
+        # Database scam rules
+        try:
+            result = await db.execute(select(ScamRule))
+            rules = result.scalars().all()
+            for rule in rules:
+                if re.search(rule.pattern, text, re.IGNORECASE):
+                    flags.append(rule.category)
+                    if rule.action == "block":
+                        action = "block"
+        except Exception:
+            pass
+
+        # Determine final action
+        blocking_categories = {"phone_number", "email", "url", "social_handle", "payment_request", "scam_phrase"}
+        has_block = any(f in blocking_categories for f in flags)
+
+        if has_block:
+            action = "block"
+        elif "off_platform" in flags:
+            action = "warn"
+
+        warning_message = None
+        if action == "block":
+            # Store the safety flag in database
+            flag_entry = SafetyFlag(
+                id=uuid.uuid4(),
+                sender_id=sender_id,
+                context=context,
+                message_text=text,
+                flags=flags,
+                action="block",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(flag_entry)
+
+            # Check repeated flags
+            res = await db.execute(
+                select(SafetyFlag).where(
+                    SafetyFlag.sender_id == sender_id,
+                    SafetyFlag.action == "block",
+                )
+            )
+            prior_flags = res.scalars().all()
+            violations_count = len(prior_flags) + 1
+
+            # Repeated violations penalize trust score
+            ut = await trust_service.get_or_create_trust(db, sender_id)
+            ut.reports_count += 1
+
+            if violations_count >= 2:
+                # Notify admins of repeated safety violations
+                outbox = OutboxEvent(
+                    topic="admin.safety_alert",
+                    payload={
+                        "sender_id": str(sender_id),
+                        "violations_count": violations_count,
+                        "flags": flags,
+                        "text": text,
+                        "action": "trust_score_penalized",
+                    },
+                )
+                db.add(outbox)
+
+            await db.commit()
+            warning_message = (
+                f"Safety alert: {', '.join(flags)} detected. "
+                "Contact details, payments, and off-platform communication are blocked."
+            )
+        elif action == "warn":
+            warning_message = "Safety notice: Never share personal contact info or transact outside WarmPath."
+
+        return {
+            "flags": flags,
+            "action": action,
+            "warning": warning_message,
+        }
+
+
 class TrustPortImpl(TrustPort):
     def __init__(self, service: TrustService):
         self.service = service
@@ -160,5 +298,18 @@ class TrustPortImpl(TrustPort):
             return await self.service.get_trust_details(db, uid)
 
 
+class SafetyPortImpl(SafetyPort):
+    def __init__(self, service: SafetyService):
+        self.service = service
+
+    async def scan_text(self, text: str, sender_id: str, context: Optional[str] = None) -> Dict[str, Any]:
+        async with async_session_maker() as db:
+            sid = uuid.UUID(sender_id)
+            return await self.service.scan_text(db, text, sid, context)
+
+
 trust_service = TrustService()
 trust_port_instance = TrustPortImpl(trust_service)
+
+safety_service = SafetyService()
+safety_port_instance = SafetyPortImpl(safety_service)

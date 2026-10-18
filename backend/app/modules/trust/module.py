@@ -4,7 +4,7 @@ Owner: M1
 """
 
 from app.modules.trust.router import router as ROUTER
-from app.modules.trust.service import trust_port_instance
+from app.modules.trust.service import trust_port_instance, safety_port_instance
 
 
 def register_events(bus):
@@ -15,3 +15,4 @@ def register_events(bus):
 def register_ports(registry):
     """Register synchronous ports implemented by trust."""
     registry.trust = trust_port_instance
+    registry.safety = safety_port_instance
