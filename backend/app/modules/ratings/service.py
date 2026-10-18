@@ -57,6 +57,13 @@ class RatingsService:
         except Exception:
             pass
 
+        # Escrow release to giver (80%) and platform fee (20%), and karma reward
+        try:
+            await ports.credits.release(str(session_id))
+            await ports.credits.reward_karma(str(session_id), str(gid))
+        except Exception:
+            pass
+
         return RatingResponse(
             id=str(rating_obj.id),
             session_id=str(rating_obj.session_id),

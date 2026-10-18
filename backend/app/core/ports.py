@@ -72,6 +72,10 @@ class CreditsPort(Protocol):
         """Refunds reserved credit to student"""
         ...
 
+    async def reward_karma(self, request_id: str, giver_id: str) -> None:
+        """Rewards karma credits to giver for free same-college session"""
+        ...
+
 
 @runtime_checkable
 class RatingsPort(Protocol):
@@ -141,6 +145,9 @@ class DefaultCreditsPort(CreditsPort):
         raise PortNotReady("CreditsPort")
 
     async def refund(self, request_id: str, reason: str) -> None:
+        raise PortNotReady("CreditsPort")
+
+    async def reward_karma(self, request_id: str, giver_id: str) -> None:
         raise PortNotReady("CreditsPort")
 
 

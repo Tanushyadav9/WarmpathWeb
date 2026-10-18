@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     MAX_OPEN_REQUESTS_ESTABLISHED: int = 25
     MAX_OPEN_REQUESTS_RESTRICTED: int = 1
 
+    # Single Credit Economy
+    CROSS_COLLEGE_CREDIT_COST: int = 5
+    GIVER_PAYOUT_SHARE: float = 0.80
+    PLATFORM_FEE_SHARE: float = 0.20
+    FREE_SESSION_KARMA_CREDITS: int = 1
+    DEMO_PAYMENT_MODE: bool = True
+
 
 settings = Settings()
 

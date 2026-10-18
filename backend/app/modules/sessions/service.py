@@ -196,6 +196,18 @@ class SessionsService:
         req_obj.status = "accepted"
         req_obj.responded_at = datetime.now(timezone.utc)
 
+        # Escrow: on request acceptance credits move to Held (free if same-college)
+        try:
+            await ports.credits.reserve(
+                student_id=str(req_obj.student_id),
+                request_id=str(req_obj.id),
+                giver_id=str(req_obj.giver_id),
+            )
+        except AppError:
+            raise
+        except Exception:
+            pass
+
         # Notify student
         notif = SessionNotification(
             id=uuid.uuid4(),
@@ -234,6 +246,12 @@ class SessionsService:
         req_obj.status = "declined"
         req_obj.decline_reason = decline_reason
         req_obj.responded_at = datetime.now(timezone.utc)
+
+        # Escrow: full refund on decline
+        try:
+            await ports.credits.refund(str(req_obj.id), reason=decline_reason)
+        except Exception:
+            pass
 
         # Notify student with decline reason
         notif = SessionNotification(
