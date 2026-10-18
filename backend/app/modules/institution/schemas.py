@@ -32,6 +32,10 @@ class DashboardOverviewResponse(BaseModel):
     average_rating: float
     free_sessions: int
     paid_sessions: int
+    total_outcomes_reported: int = 0
+    positive_outcomes_count: int = 0
+    outcome_rate: float = 0.0
+    outcome_breakdown: Dict[str, int] = {}
     skill_gap: List[SkillGapItem] = []
     top_givers: List[TopGiverItem] = []
     charts_data: Dict[str, Any] = {}
@@ -139,3 +143,98 @@ class TrustLayerItem(BaseModel):
 class TrustLayersResponse(BaseModel):
     layers: List[TrustLayerItem]
     summary: Dict[str, int]
+
+
+# --- Outcome Tracking Schemas ---
+
+class SessionOutcomeCreateInput(BaseModel):
+    outcome: str = Field(..., description="'interview', 'referral', 'project_feedback', 'offer', 'nothing_yet'")
+    notes: Optional[str] = None
+
+
+class SessionOutcomeResponse(BaseModel):
+    id: str
+    session_id: str
+    student_id: str
+    giver_id: str
+    outcome: str
+    notes: Optional[str] = None
+    created_at: str
+
+
+# --- Network Graph Schemas ---
+
+class GraphNode(BaseModel):
+    id: str
+    label: str
+    role: str  # student, alumnus, faculty, recruiter, founder
+    color: str  # #3B82F6 (student), #10B981 (alumnus), #8B5CF6 (faculty), #F59E0B (recruiter), #EC4899 (founder)
+    college: str
+    skills: List[str] = []
+    safe_summary: Dict[str, Any] = {}
+
+
+class GraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    type: str  # "completed_session" or "vouch"
+    label: str
+
+
+class NetworkGraphResponse(BaseModel):
+    nodes: List[GraphNode]
+    edges: List[GraphEdge]
+    summary: Dict[str, Any]
+
+
+# --- Pilot Metrics & Launch Gate Schemas ---
+
+class LaunchGateStatus(BaseModel):
+    is_open: bool
+    color: str  # "green" or "red"
+    label: str  # "Launch Gate Open - Enabled for New College" or "Launch Gate Locked - Requirements Pending"
+    verified_givers_target: int = 50
+    verified_givers_current: int
+    answer_rate_target_percent: float = 60.0
+    answer_rate_current_percent: float
+    requirements_met: bool
+    missing_requirements: List[str] = []
+
+
+class PlanPhase(BaseModel):
+    phase_days: str  # "30-day", "60-day", "90-day"
+    name: str  # "Prepare", "Open", "Prove"
+    objective: str
+    key_actions: List[str]
+    target_milestones: List[str]
+    status: str  # "completed", "in_progress", "pending"
+
+
+class PilotMetricsResponse(BaseModel):
+    launch_gate: LaunchGateStatus
+    verified_givers_count: int
+    verified_givers_target: int = 50
+    answer_rate_72h_percent: float
+    answer_rate_target_percent: float = 60.0
+    thirty_sixty_ninety_plan: List[PlanPhase]
+
+
+class CollegeCreateInput(BaseModel):
+    name: str
+    code: str
+
+
+class CollegeEnableInput(BaseModel):
+    college_id: Optional[str] = None
+    name: Optional[str] = None
+    code: Optional[str] = None
+
+
+class CollegeResponse(BaseModel):
+    id: str
+    name: str
+    code: str
+    is_enabled: bool
+    created_at: str
+

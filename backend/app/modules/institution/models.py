@@ -66,3 +66,28 @@ class VerificationRecord(Base):
     admin_notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class SessionOutcome(Base):
+    """Post-session outcome tracking reported by student 7 days after completion."""
+    __tablename__ = "session_outcomes"
+
+    id = Column(PG_UUID, primary_key=True, default=uuid.uuid4)
+    session_id = Column(PG_UUID, unique=True, index=True, nullable=False)
+    student_id = Column(PG_UUID, index=True, nullable=False)
+    giver_id = Column(PG_UUID, index=True, nullable=False)
+    outcome = Column(String(50), nullable=False)  # interview, referral, project_feedback, offer, nothing_yet
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class College(Base):
+    """Partner institution record controlled by the pilot launch gate."""
+    __tablename__ = "colleges"
+
+    id = Column(PG_UUID, primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), unique=True, index=True, nullable=False)
+    code = Column(String(50), unique=True, nullable=False)
+    is_enabled = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+

@@ -12,7 +12,7 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
 from app.core.db import Base, engine, async_session_maker, get_db
-from app.main import app
+from app.main import app as fastapi_app
 
 # Import all models so Base.metadata knows about them
 import app.modules.availability.models
@@ -53,8 +53,8 @@ async def async_client():
         async with async_session_maker() as session:
             yield session
 
-    app.dependency_overrides[get_db] = override_get_db
-    transport = ASGITransport(app=app)
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+    transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
-    app.dependency_overrides.clear()
+    fastapi_app.dependency_overrides.clear()

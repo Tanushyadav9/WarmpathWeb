@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.db import OutboxEvent
 from app.core.errors import AppError
 from app.modules.availability.models import AvailabilityNotification, GiverAvailability
-from app.modules.institution.models import AdminAuditLog, IncidentLog, Report, VerificationRecord
+from app.modules.institution.models import AdminAuditLog, College, IncidentLog, Report, SessionOutcome, VerificationRecord
 from app.modules.institution.schemas import (
     DashboardOverviewResponse,
     SkillGapItem,
@@ -25,9 +25,20 @@ from app.modules.institution.schemas import (
     IncidentLogResponse,
     TrustLayerItem,
     TrustLayersResponse,
+    SessionOutcomeCreateInput,
+    SessionOutcomeResponse,
+    GraphNode,
+    GraphEdge,
+    NetworkGraphResponse,
+    LaunchGateStatus,
+    PlanPhase,
+    PilotMetricsResponse,
+    CollegeCreateInput,
+    CollegeEnableInput,
+    CollegeResponse,
 )
 from app.modules.matching.models import EmployerProfile, FacultyProfile, GiverProfile, StudentProfile
-from app.modules.ratings.models import SessionRating
+from app.modules.ratings.models import SessionRating, Vouch
 from app.modules.sessions.models import MentorshipMessage, MentorshipRequest
 from app.modules.trust.models import SafetyFlag, ScamRule, UserTrust
 
@@ -170,7 +181,25 @@ class InstitutionService:
                 )
             )
 
-        # 6. Charts Data
+        # 6. Session Outcomes Tracking
+        res_outcomes = await db.execute(select(SessionOutcome))
+        all_outcomes = res_outcomes.scalars().all()
+        total_outcomes_reported = len(all_outcomes)
+        positive_types = {"interview", "referral", "project_feedback", "offer"}
+        positive_count = sum(1 for o in all_outcomes if o.outcome in positive_types)
+        outcome_rate = round((positive_count / max(1, total_outcomes_reported)) * 100, 1) if total_outcomes_reported > 0 else 0.0
+
+        outcome_breakdown: Dict[str, int] = {
+            "interview": 0,
+            "referral": 0,
+            "project_feedback": 0,
+            "offer": 0,
+            "nothing_yet": 0,
+        }
+        for o in all_outcomes:
+            outcome_breakdown[o.outcome] = outcome_breakdown.get(o.outcome, 0) + 1
+
+        # 7. Charts Data
         status_dist: Dict[str, int] = {}
         for r in all_reqs:
             status_dist[r.status] = status_dist.get(r.status, 0) + 1
@@ -179,6 +208,7 @@ class InstitutionService:
             "status_distribution": status_dist,
             "sessions_free_vs_paid": {"free": free_sessions, "paid": paid_sessions},
             "alumni_status": {"active": active_givers, "inactive": inactive_givers},
+            "outcome_distribution": outcome_breakdown,
         }
 
         return DashboardOverviewResponse(
@@ -193,6 +223,10 @@ class InstitutionService:
             average_rating=avg_rating,
             free_sessions=free_sessions,
             paid_sessions=paid_sessions,
+            total_outcomes_reported=total_outcomes_reported,
+            positive_outcomes_count=positive_count,
+            outcome_rate=outcome_rate,
+            outcome_breakdown=outcome_breakdown,
             skill_gap=skill_gap_items,
             top_givers=top_givers_list,
             charts_data=charts_data,
@@ -213,6 +247,9 @@ class InstitutionService:
             f"average_rating,{data.average_rating}",
             f"free_sessions,{data.free_sessions}",
             f"paid_sessions,{data.paid_sessions}",
+            f"total_outcomes_reported,{data.total_outcomes_reported}",
+            f"positive_outcomes_count,{data.positive_outcomes_count}",
+            f"outcome_rate_percent,{data.outcome_rate}",
         ]
         return "\n".join(lines)
 
@@ -754,6 +791,633 @@ class InstitutionService:
         }
 
         return TrustLayersResponse(layers=layers, summary=summary)
+
+    # --- 6. Post-Session Outcome Tracking ---
+
+    async def submit_outcome(
+        self,
+        db: AsyncSession,
+        session_id: uuid.UUID,
+        student_id: uuid.UUID,
+        req: SessionOutcomeCreateInput,
+    ) -> SessionOutcomeResponse:
+        """
+        Records 7-day post-session career outcome:
+        interview, referral, project_feedback, offer, nothing_yet.
+        """
+        valid_outcomes = {"interview", "referral", "project_feedback", "offer", "nothing_yet"}
+        outcome_val = req.outcome.strip().lower()
+        if outcome_val not in valid_outcomes:
+            raise AppError(
+                code="invalid_outcome",
+                message=f"Outcome must be one of: {sorted(list(valid_outcomes))}",
+                status_code=400,
+            )
+
+        res_sess = await db.execute(select(MentorshipRequest).where(MentorshipRequest.id == session_id))
+        session_req = res_sess.scalar_one_or_none()
+        if not session_req:
+            raise AppError(code="session_not_found", message="Session not found", status_code=404)
+
+        if session_req.student_id != student_id:
+            raise AppError(
+                code="forbidden",
+                message="Only the student in this session can report an outcome",
+                status_code=403,
+            )
+
+        if session_req.status not in ("completed", "rated"):
+            raise AppError(
+                code="invalid_session_status",
+                message="Outcomes can only be tracked for completed or rated sessions",
+                status_code=400,
+            )
+
+        res_out = await db.execute(select(SessionOutcome).where(SessionOutcome.session_id == session_id))
+        existing = res_out.scalar_one_or_none()
+        if existing:
+            existing.outcome = outcome_val
+            existing.notes = req.notes
+            await db.commit()
+            await db.refresh(existing)
+            rec = existing
+        else:
+            rec = SessionOutcome(
+                session_id=session_id,
+                student_id=student_id,
+                giver_id=session_req.giver_id,
+                outcome=outcome_val,
+                notes=req.notes,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(rec)
+            await db.commit()
+            await db.refresh(rec)
+
+        return SessionOutcomeResponse(
+            id=str(rec.id),
+            session_id=str(rec.session_id),
+            student_id=str(rec.student_id),
+            giver_id=str(rec.giver_id),
+            outcome=rec.outcome,
+            notes=rec.notes,
+            created_at=rec.created_at.isoformat(),
+        )
+
+    # --- 7. Network Graph ("A Network, Not a Directory") ---
+
+    async def get_network_graph(
+        self,
+        db: AsyncSession,
+        role: Optional[str] = None,
+        college: Optional[str] = None,
+        skill: Optional[str] = None,
+    ) -> NetworkGraphResponse:
+        """
+        Generates interactive force-directed network graph:
+        - Colored nodes: students (#3B82F6), alumni (#10B981), faculty (#8B5CF6), recruiters (#F59E0B), founders (#EC4899)
+        - Edges: completed_session and vouch from real database records
+        - Safe summary with contact details hidden
+        - Filtering by role, college, skill
+        """
+        # 1. Fetch completed sessions & vouches to compute edge & node session counts
+        res_req = await db.execute(
+            select(MentorshipRequest).where(MentorshipRequest.status.in_(["completed", "rated"]))
+        )
+        completed_reqs = res_req.scalars().all()
+
+        res_vouch = await db.execute(select(Vouch))
+        all_vouches = res_vouch.scalars().all()
+
+        session_counts: Dict[str, int] = {}
+        for r in completed_reqs:
+            s_id = str(r.student_id)
+            g_id = str(r.giver_id)
+            session_counts[s_id] = session_counts.get(s_id, 0) + 1
+            session_counts[g_id] = session_counts.get(g_id, 0) + 1
+
+        vouch_counts: Dict[str, int] = {}
+        for v in all_vouches:
+            s_id = str(v.student_id)
+            g_id = str(v.giver_id)
+            vouch_counts[s_id] = vouch_counts.get(s_id, 0) + 1
+            vouch_counts[g_id] = vouch_counts.get(g_id, 0) + 1
+
+        # 2. Build nodes from database profiles
+        nodes_dict: Dict[str, GraphNode] = {}
+
+        # 2a. Students
+        res_students = await db.execute(select(StudentProfile))
+        for sp in res_students.scalars().all():
+            nid = str(sp.user_id)
+            sk = [s.strip() for s in sp.skills] if isinstance(sp.skills, list) else []
+            nodes_dict[nid] = GraphNode(
+                id=nid,
+                label=sp.full_name,
+                role="student",
+                color="#3B82F6",
+                college=sp.college,
+                skills=sk,
+                safe_summary={
+                    "name": sp.full_name,
+                    "role": "student",
+                    "headline": f"Student at {sp.college}",
+                    "college": sp.college,
+                    "city": sp.city,
+                    "skills": sk,
+                    "completed_sessions": session_counts.get(nid, 0),
+                    "vouches": vouch_counts.get(nid, 0),
+                    "contact_hidden": True,
+                    "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                },
+            )
+
+        # 2b. Alumni / Givers
+        res_givers = await db.execute(select(GiverProfile))
+        for gp in res_givers.scalars().all():
+            nid = str(gp.user_id)
+            sk = [s.strip() for s in (gp.skills or "").split(",") if s.strip()]
+            nodes_dict[nid] = GraphNode(
+                id=nid,
+                label=gp.full_name,
+                role="alumnus",
+                color="#10B981",
+                college=gp.college or "Alumni Network",
+                skills=sk,
+                safe_summary={
+                    "name": gp.full_name,
+                    "role": "alumnus",
+                    "headline": gp.headline or f"Alumnus at {gp.college or 'Network'}",
+                    "college": gp.college or "Alumni Network",
+                    "skills": sk,
+                    "completed_sessions": session_counts.get(nid, 0),
+                    "vouches": vouch_counts.get(nid, 0),
+                    "is_verified": gp.is_verified,
+                    "contact_hidden": True,
+                    "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                },
+            )
+
+        # 2c. Faculty
+        res_faculty = await db.execute(select(FacultyProfile))
+        for fp in res_faculty.scalars().all():
+            nid = str(fp.user_id)
+            sk = fp.expertise if isinstance(fp.expertise, list) else []
+            nodes_dict[nid] = GraphNode(
+                id=nid,
+                label=fp.full_name,
+                role="faculty",
+                color="#8B5CF6",
+                college=fp.institution,
+                skills=sk,
+                safe_summary={
+                    "name": fp.full_name,
+                    "role": "faculty",
+                    "headline": f"Faculty, Department of {fp.department}",
+                    "college": fp.institution,
+                    "skills": sk,
+                    "rate_credits": fp.rate_credits,
+                    "completed_sessions": session_counts.get(nid, 0),
+                    "vouches": vouch_counts.get(nid, 0),
+                    "contact_hidden": True,
+                    "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                },
+            )
+
+        # 2d. Recruiters & Founders
+        res_employers = await db.execute(select(EmployerProfile))
+        for ep in res_employers.scalars().all():
+            nid = str(ep.user_id)
+            desig_lower = (ep.designation or "").lower()
+            is_founder = "founder" in desig_lower or "ceo" in desig_lower
+            node_role = "founder" if is_founder else "recruiter"
+            color_val = "#EC4899" if is_founder else "#F59E0B"
+            nodes_dict[nid] = GraphNode(
+                id=nid,
+                label=ep.full_name,
+                role=node_role,
+                color=color_val,
+                college=ep.company_name,
+                skills=[],
+                safe_summary={
+                    "name": ep.full_name,
+                    "role": node_role,
+                    "headline": f"{ep.designation} at {ep.company_name}",
+                    "college": ep.company_name,
+                    "company": ep.company_name,
+                    "company_domain": ep.company_domain,
+                    "completed_sessions": session_counts.get(nid, 0),
+                    "vouches": vouch_counts.get(nid, 0),
+                    "contact_hidden": True,
+                    "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                },
+            )
+
+        # 2e. Ensure any participants in sessions or vouches without profile exist as nodes
+        for r in completed_reqs:
+            s_id = str(r.student_id)
+            g_id = str(r.giver_id)
+            if s_id not in nodes_dict:
+                nodes_dict[s_id] = GraphNode(
+                    id=s_id,
+                    label=f"Student {s_id[:6]}",
+                    role="student",
+                    color="#3B82F6",
+                    college="Campus Network",
+                    skills=[],
+                    safe_summary={
+                        "name": f"Student {s_id[:6]}",
+                        "role": "student",
+                        "headline": "Student Scholar",
+                        "college": "Campus Network",
+                        "skills": [],
+                        "completed_sessions": session_counts.get(s_id, 0),
+                        "vouches": vouch_counts.get(s_id, 0),
+                        "contact_hidden": True,
+                        "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                    },
+                )
+            if g_id not in nodes_dict:
+                nodes_dict[g_id] = GraphNode(
+                    id=g_id,
+                    label=f"Mentor {g_id[:6]}",
+                    role="alumnus",
+                    color="#10B981",
+                    college="Alumni Network",
+                    skills=[],
+                    safe_summary={
+                        "name": f"Mentor {g_id[:6]}",
+                        "role": "alumnus",
+                        "headline": "Alumni Mentor",
+                        "college": "Alumni Network",
+                        "skills": [],
+                        "completed_sessions": session_counts.get(g_id, 0),
+                        "vouches": vouch_counts.get(g_id, 0),
+                        "contact_hidden": True,
+                        "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                    },
+                )
+
+        for v in all_vouches:
+            s_id = str(v.student_id)
+            g_id = str(v.giver_id)
+            if s_id not in nodes_dict:
+                nodes_dict[s_id] = GraphNode(
+                    id=s_id,
+                    label=f"Student {s_id[:6]}",
+                    role="student",
+                    color="#3B82F6",
+                    college="Campus Network",
+                    skills=[],
+                    safe_summary={
+                        "name": f"Student {s_id[:6]}",
+                        "role": "student",
+                        "headline": "Student Scholar",
+                        "college": "Campus Network",
+                        "skills": [],
+                        "completed_sessions": session_counts.get(s_id, 0),
+                        "vouches": vouch_counts.get(s_id, 0),
+                        "contact_hidden": True,
+                        "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                    },
+                )
+            if g_id not in nodes_dict:
+                nodes_dict[g_id] = GraphNode(
+                    id=g_id,
+                    label=v.giver_name,
+                    role="alumnus",
+                    color="#10B981",
+                    college=v.giver_company,
+                    skills=[],
+                    safe_summary={
+                        "name": v.giver_name,
+                        "role": "alumnus",
+                        "headline": f"Leader at {v.giver_company}",
+                        "college": v.giver_company,
+                        "skills": [],
+                        "completed_sessions": session_counts.get(g_id, 0),
+                        "vouches": vouch_counts.get(g_id, 0),
+                        "contact_hidden": True,
+                        "safe_notice": "Contact details protected under Warmpath safe network protocol",
+                    },
+                )
+
+        # 3. Filtering nodes by role, college, skill
+        filtered_nodes = list(nodes_dict.values())
+        if role:
+            r_clean = role.strip().lower()
+            filtered_nodes = [n for n in filtered_nodes if n.role.lower() == r_clean]
+
+        if college:
+            c_clean = college.strip().lower()
+            filtered_nodes = [n for n in filtered_nodes if c_clean in n.college.lower()]
+
+        if skill:
+            s_clean = skill.strip().lower()
+            filtered_nodes = [
+                n for n in filtered_nodes
+                if any(s_clean in sk.lower() for sk in n.skills)
+            ]
+
+        valid_node_ids = {n.id for n in filtered_nodes}
+
+        # 4. Construct Edges from database (completed sessions and vouches)
+        edges: List[GraphEdge] = []
+        for r in completed_reqs:
+            s_id = str(r.student_id)
+            g_id = str(r.giver_id)
+            if s_id in valid_node_ids and g_id in valid_node_ids:
+                edges.append(
+                    GraphEdge(
+                        id=f"session-{r.id}",
+                        source=s_id,
+                        target=g_id,
+                        type="completed_session",
+                        label="Completed Session",
+                    )
+                )
+
+        for v in all_vouches:
+            s_id = str(v.student_id)
+            g_id = str(v.giver_id)
+            if g_id in valid_node_ids and s_id in valid_node_ids:
+                edges.append(
+                    GraphEdge(
+                        id=f"vouch-{v.id}",
+                        source=g_id,
+                        target=s_id,
+                        type="vouch",
+                        label=f"Vouched ({v.giver_company})",
+                    )
+                )
+
+        summary = {
+            "total_nodes": len(filtered_nodes),
+            "total_edges": len(edges),
+            "nodes_by_role": {
+                "student": sum(1 for n in filtered_nodes if n.role == "student"),
+                "alumnus": sum(1 for n in filtered_nodes if n.role == "alumnus"),
+                "faculty": sum(1 for n in filtered_nodes if n.role == "faculty"),
+                "recruiter": sum(1 for n in filtered_nodes if n.role == "recruiter"),
+                "founder": sum(1 for n in filtered_nodes if n.role == "founder"),
+            },
+            "edges_by_type": {
+                "completed_session": sum(1 for e in edges if e.type == "completed_session"),
+                "vouch": sum(1 for e in edges if e.type == "vouch"),
+            },
+        }
+
+        return NetworkGraphResponse(nodes=filtered_nodes, edges=edges, summary=summary)
+
+    # --- 8. Pilot Metrics & Launch Gate ---
+
+    async def get_pilot_metrics(self, db: AsyncSession) -> PilotMetricsResponse:
+        """
+        Calculates pilot metrics:
+        - 50 verified givers progress
+        - 72h request answer rate vs 60% pilot target
+        - Launch Gate indicator (green when targets met, otherwise locked red)
+        - 30/60/90-day plan (Prepare, Open, Prove)
+        """
+        # 1. Verified givers count
+        res_vg = await db.execute(select(func.count(GiverProfile.id)).where(GiverProfile.is_verified == True))
+        verified_givers_count = res_vg.scalar() or 0
+
+        # 2. Answer rate within 72h
+        res_req = await db.execute(select(MentorshipRequest))
+        all_reqs = res_req.scalars().all()
+        total_requests = len(all_reqs)
+
+        answered_within_72h = 0
+        for r in all_reqs:
+            creat_dt = to_utc_datetime(r.created_at)
+            resp_dt = to_utc_datetime(r.responded_at)
+            if creat_dt and resp_dt:
+                diff_sec = (resp_dt - creat_dt).total_seconds()
+                if 0 <= diff_sec <= 72 * 3600:
+                    answered_within_72h += 1
+            elif r.status in ("accepted", "declined", "completed", "scheduled", "rated"):
+                answered_within_72h += 1
+
+        answer_rate_72h = round((answered_within_72h / total_requests) * 100, 1) if total_requests > 0 else 0.0
+
+        # 3. Launch gate evaluation
+        is_open = (verified_givers_count >= 50) and (answer_rate_72h >= 60.0)
+        gate_color = "green" if is_open else "red"
+        gate_label = (
+            "Launch Gate Open - Enabled for New College"
+            if is_open
+            else "Launch Gate Locked - Requirements Pending"
+        )
+
+        missing_reqs: List[str] = []
+        if verified_givers_count < 50:
+            missing_reqs.append(
+                f"{50 - verified_givers_count} more verified givers needed (current: {verified_givers_count}/50)"
+            )
+        if answer_rate_72h < 60.0:
+            missing_reqs.append(
+                f"72h request answer rate must reach 60.0% (current: {answer_rate_72h}%/60.0%)"
+            )
+
+        launch_gate = LaunchGateStatus(
+            is_open=is_open,
+            color=gate_color,
+            label=gate_label,
+            verified_givers_target=50,
+            verified_givers_current=verified_givers_count,
+            answer_rate_target_percent=60.0,
+            answer_rate_current_percent=answer_rate_72h,
+            requirements_met=is_open,
+            missing_requirements=missing_reqs,
+        )
+
+        # 4. 30/60/90-Day Plan (Prepare, Open, Prove)
+        plan = [
+            PlanPhase(
+                phase_days="30-day",
+                name="Prepare",
+                objective="Seed the initial network with verified alumni and faculty domain mentors.",
+                key_actions=[
+                    "Onboard first 25 verified alumni mentors",
+                    "Establish department student ambassadors",
+                    "Calibrate scam middleware and calendar links",
+                ],
+                target_milestones=[
+                    "25+ verified givers registered",
+                    "Zero unresolved safety reports",
+                ],
+                status="completed" if verified_givers_count >= 25 else "in_progress",
+            ),
+            PlanPhase(
+                phase_days="60-day",
+                name="Open",
+                objective="Open matching to first student cohort and validate 72h response SLA.",
+                key_actions=[
+                    "Launch student matching for pilot college cohort",
+                    "Track 72h response rate against 60% threshold",
+                    "Activate sponsored credits pool for cross-college access",
+                ],
+                target_milestones=[
+                    "50 verified givers reached",
+                    "60% 72h answer rate maintained",
+                    "Launch gate unlocked for multi-college enablement",
+                ],
+                status="completed" if is_open else ("in_progress" if verified_givers_count >= 25 else "pending"),
+            ),
+            PlanPhase(
+                phase_days="90-day",
+                name="Prove",
+                objective="Prove career impact via 7-day post-session outcome tracking and expand network.",
+                key_actions=[
+                    "Track 7-day post-session student career outcomes",
+                    "Analyze skill gap and recruiter opt-in pipeline",
+                    "Enable new partner colleges through unlocked launch gate",
+                ],
+                target_milestones=[
+                    ">30% positive career outcome rate",
+                    "Onboard second partner institution via green launch gate",
+                    "Present Pilot metrics to Academic Dean and Placement Cell",
+                ],
+                status="in_progress" if is_open else "pending",
+            ),
+        ]
+
+        return PilotMetricsResponse(
+            launch_gate=launch_gate,
+            verified_givers_count=verified_givers_count,
+            verified_givers_target=50,
+            answer_rate_72h_percent=answer_rate_72h,
+            answer_rate_target_percent=60.0,
+            thirty_sixty_ninety_plan=plan,
+        )
+
+    async def enable_college(
+        self,
+        db: AsyncSession,
+        admin_id: uuid.UUID,
+        req: CollegeEnableInput,
+    ) -> CollegeResponse:
+        """
+        Enables a college institution. Blocked if the pilot launch gate is locked.
+        """
+        metrics = await self.get_pilot_metrics(db)
+        if not metrics.launch_gate.is_open:
+            raise AppError(
+                code="launch_gate_locked",
+                message=(
+                    f"The launch gate is locked. Pilot targets (50 verified givers and 60% 72h answer rate) "
+                    f"must be met before a new college can be enabled. "
+                    f"Current: {metrics.verified_givers_count}/50 verified givers, "
+                    f"{metrics.answer_rate_72h_percent}%/60.0% answer rate."
+                ),
+                status_code=400,
+            )
+
+        college_obj: Optional[College] = None
+        if req.college_id:
+            res = await db.execute(select(College).where(College.id == uuid.UUID(req.college_id)))
+            college_obj = res.scalar_one_or_none()
+            if not college_obj:
+                raise AppError(code="college_not_found", message="College not found", status_code=404)
+            college_obj.is_enabled = True
+        else:
+            name = req.name or "Partner College"
+            code = req.code or name[:6].upper()
+            res = await db.execute(select(College).where((College.name == name) | (College.code == code)))
+            college_obj = res.scalar_one_or_none()
+            if college_obj:
+                college_obj.is_enabled = True
+            else:
+                college_obj = College(
+                    name=name,
+                    code=code,
+                    is_enabled=True,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(college_obj)
+
+        db.add(
+            AdminAuditLog(
+                admin_id=admin_id,
+                action="enable_college",
+                target_type="college",
+                target_id=str(college_obj.id),
+                reason="Pilot targets verified, launch gate green. College enabled.",
+                metadata_json={"name": college_obj.name, "code": college_obj.code},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+        await db.refresh(college_obj)
+
+        return CollegeResponse(
+            id=str(college_obj.id),
+            name=college_obj.name,
+            code=college_obj.code,
+            is_enabled=college_obj.is_enabled,
+            created_at=college_obj.created_at.isoformat(),
+        )
+
+    async def create_college(
+        self,
+        db: AsyncSession,
+        admin_id: uuid.UUID,
+        req: CollegeCreateInput,
+    ) -> CollegeResponse:
+        res = await db.execute(select(College).where((College.name == req.name) | (College.code == req.code)))
+        existing = res.scalar_one_or_none()
+        if existing:
+            return CollegeResponse(
+                id=str(existing.id),
+                name=existing.name,
+                code=existing.code,
+                is_enabled=existing.is_enabled,
+                created_at=existing.created_at.isoformat(),
+            )
+
+        col = College(
+            name=req.name,
+            code=req.code,
+            is_enabled=False,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(col)
+        db.add(
+            AdminAuditLog(
+                admin_id=admin_id,
+                action="create_college",
+                target_type="college",
+                target_id=str(col.id),
+                reason="College created (pending enablement via launch gate)",
+                metadata_json={"name": col.name, "code": col.code},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+        await db.refresh(col)
+
+        return CollegeResponse(
+            id=str(col.id),
+            name=col.name,
+            code=col.code,
+            is_enabled=col.is_enabled,
+            created_at=col.created_at.isoformat(),
+        )
+
+    async def list_colleges(self, db: AsyncSession) -> List[CollegeResponse]:
+        res = await db.execute(select(College).order_by(College.name.asc()))
+        colleges = res.scalars().all()
+        return [
+            CollegeResponse(
+                id=str(c.id),
+                name=c.name,
+                code=c.code,
+                is_enabled=c.is_enabled,
+                created_at=c.created_at.isoformat(),
+            )
+            for c in colleges
+        ]
 
 
 institution_service = InstitutionService()

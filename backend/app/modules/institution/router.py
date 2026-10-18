@@ -15,6 +15,13 @@ from app.modules.institution.schemas import (
     ReportResponse,
     ReportResolveInput,
     TrustLayersResponse,
+    SessionOutcomeCreateInput,
+    SessionOutcomeResponse,
+    NetworkGraphResponse,
+    PilotMetricsResponse,
+    CollegeCreateInput,
+    CollegeEnableInput,
+    CollegeResponse,
 )
 from app.modules.institution.service import institution_service
 
@@ -161,3 +168,98 @@ async def get_admin_trust_layers(
     db: AsyncSession = Depends(get_db),
 ):
     return await institution_service.get_trust_layers(db)
+
+
+# --- 5. Post-Session Outcome Tracking ---
+
+@router.post("/sessions/{id}/outcome", response_model=SessionOutcomeResponse, summary="Report 7-day post-session career outcome")
+async def post_session_outcome(
+    id: str,
+    req: SessionOutcomeCreateInput,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    session_id = uuid.UUID(id)
+    student_id = uuid.UUID(get_current_user_id(request))
+    return await institution_service.submit_outcome(db, session_id, student_id, req)
+
+
+@router.post("/requests/{id}/outcome", response_model=SessionOutcomeResponse, summary="Report 7-day post-session career outcome (alias)")
+async def post_request_outcome(
+    id: str,
+    req: SessionOutcomeCreateInput,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    session_id = uuid.UUID(id)
+    student_id = uuid.UUID(get_current_user_id(request))
+    return await institution_service.submit_outcome(db, session_id, student_id, req)
+
+
+# --- 6. Network Graph Endpoints ---
+
+@router.get("/admin/network-graph", response_model=NetworkGraphResponse, summary="Interactive force-directed network graph")
+async def get_admin_network_graph(
+    role: Optional[str] = Query(None, description="Filter by role ('student', 'alumnus', 'faculty', 'recruiter', 'founder')"),
+    college: Optional[str] = Query(None, description="Filter by college / institution name"),
+    skill: Optional[str] = Query(None, description="Filter by skill tag"),
+    db: AsyncSession = Depends(get_db),
+):
+    return await institution_service.get_network_graph(db, role=role, college=college, skill=skill)
+
+
+@router.get("/network-graph", response_model=NetworkGraphResponse, summary="Interactive network graph (safe view)")
+async def get_public_network_graph(
+    role: Optional[str] = Query(None, description="Filter by role ('student', 'alumnus', 'faculty', 'recruiter', 'founder')"),
+    college: Optional[str] = Query(None, description="Filter by college / institution name"),
+    skill: Optional[str] = Query(None, description="Filter by skill tag"),
+    db: AsyncSession = Depends(get_db),
+):
+    return await institution_service.get_network_graph(db, role=role, college=college, skill=skill)
+
+
+# --- 7. Pilot Metrics & Launch Gate Endpoints ---
+
+@router.get("/admin/pilot-metrics", response_model=PilotMetricsResponse, summary="Progress toward 50 verified givers, 72h answer rate, launch gate, and 30/60/90-day plan")
+async def get_admin_pilot_metrics(
+    db: AsyncSession = Depends(get_db),
+):
+    return await institution_service.get_pilot_metrics(db)
+
+
+@router.post("/admin/colleges/enable", response_model=CollegeResponse, summary="Enable college (guarded by pilot launch gate)")
+async def post_admin_college_enable(
+    req: CollegeEnableInput,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    admin_id = uuid.UUID(get_current_user_id(request))
+    return await institution_service.enable_college(db, admin_id, req)
+
+
+@router.post("/admin/colleges/{id}/enable", response_model=CollegeResponse, summary="Enable college by ID (guarded by pilot launch gate)")
+async def post_admin_college_id_enable(
+    id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    admin_id = uuid.UUID(get_current_user_id(request))
+    return await institution_service.enable_college(db, admin_id, CollegeEnableInput(college_id=id))
+
+
+@router.post("/admin/colleges", response_model=CollegeResponse, summary="Create a new partner college")
+async def post_admin_college_create(
+    req: CollegeCreateInput,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    admin_id = uuid.UUID(get_current_user_id(request))
+    return await institution_service.create_college(db, admin_id, req)
+
+
+@router.get("/admin/colleges", response_model=List[CollegeResponse], summary="List all registered colleges and enablement status")
+async def get_admin_colleges(
+    db: AsyncSession = Depends(get_db),
+):
+    return await institution_service.list_colleges(db)
+
