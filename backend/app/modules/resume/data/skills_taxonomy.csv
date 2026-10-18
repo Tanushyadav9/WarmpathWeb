@@ -1,0 +1,44 @@
+name,category,aliases
+Python,Programming Languages,py|python3|cpython
+JavaScript,Programming Languages,js|ecmascript|es6
+TypeScript,Programming Languages,ts|typescript
+Java,Programming Languages,java|core java|j2se
+C++,Programming Languages,cpp|c plus plus
+C,Programming Languages,ansi c
+Go,Programming Languages,golang
+Rust,Programming Languages,rustlang
+Kotlin,Programming Languages,kt
+Swift,Programming Languages,swift
+Dart,Programming Languages,dartlang
+SQL,Databases,structured query language|ansi sql
+FastAPI,Web Frameworks,fastapi|fast api
+Django,Web Frameworks,django
+Flask,Web Frameworks,flask
+React,Web Frameworks,reactjs|react.js
+Node.js,Web Frameworks,nodejs|node
+Next.js,Web Frameworks,nextjs|next
+Express.js,Web Frameworks,express|expressjs
+Flutter,Mobile Development,flutter sdk
+React Native,Mobile Development,rn|react-native
+Android,Mobile Development,android sdk
+iOS,Mobile Development,ios development
+PostgreSQL,Databases,postgres|pgsql
+MySQL,Databases,my-sql
+MongoDB,Databases,mongo
+Redis,Databases,redis-cache
+Docker,Cloud & DevOps,docker container|dockerfile
+Kubernetes,Cloud & DevOps,k8s
+Git,Tools & Version Control,git vcs|github|gitlab
+AWS,Cloud & DevOps,amazon web services|ec2|s3
+Google Cloud,Cloud & DevOps,gcp|google cloud platform
+Linux,Systems & Infrastructure,gnu/linux|ubuntu|debian
+Machine Learning,Artificial Intelligence,ml|machine-learning
+Deep Learning,Artificial Intelligence,dl|neural networks
+TensorFlow,Artificial Intelligence,tf
+PyTorch,Artificial Intelligence,torch
+Pandas,Data Science,pandas dataframe
+NumPy,Data Science,numpy array
+GraphQL,API & Integration,gql
+Tailwind CSS,Web Development,tailwind
+HTML/CSS,Web Development,html|css|html5|css3
+REST API,API & Integration,restful api|rest

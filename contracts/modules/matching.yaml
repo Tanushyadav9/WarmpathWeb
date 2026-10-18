@@ -2,40 +2,433 @@ paths:
   /recommendations:
     get:
       summary: "Get ranked mentor recommendations for student"
+      description: "Returns honest Heuristic Score v1 recommendations with deterministic why_lines explainability, pgvector HNSW candidate search, and hard gates."
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [own_college, cross_college, experts]
+            default: own_college
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: filter_domain
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: filter_help_type
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Ranked list of recommended mentors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationsResponse'
+        "401":
+          description: Unauthorized
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden - student verification required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /givers/{id}:
     get:
       summary: "View giver mentorship profile"
+      description: "Returns public card for giver (name, headline, badges, band, ratings, offers, availability, and why_lines). Never exposes contact details."
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Public giver profile card
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GiverPublicCard'
+        "404":
+          description: Giver profile not found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /me/giver-profile:
-    put:
-      summary: "Update own giver mentorship profile and topics"
-      responses:
-        "501":
-          description: Module not implemented
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+
   /me/giver-profile:
     get:
       summary: "Retrieve own giver mentorship profile"
+      description: "Returns the authenticated user's giver profile, weekly capacity, and response stats."
       responses:
-        "501":
-          description: Module not implemented
+        "200":
+          description: Giver profile data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GiverProfileResponse'
+        "401":
+          description: Unauthorized
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Giver profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      summary: "Update own giver mentorship profile and topics"
+      description: "Creates or updates giver profile, re-embeds offers, skills, and bio, and publishes giver.profile_updated outbox event."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GiverProfileCreateUpdate'
+      responses:
+        "200":
+          description: Updated giver profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GiverProfileResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden - giver role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    GiverProfileCreateUpdate:
+      type: object
+      properties:
+        offers:
+          type: array
+          items:
+            type: string
+          example: ["resume_review", "mock_interview", "career_guidance"]
+        topics:
+          type: array
+          items:
+            type: string
+          example: ["Backend Engineering", "Distributed Systems"]
+        skills:
+          type: array
+          items:
+            type: object
+          example: [{"name": "Python", "category": "Programming Languages"}]
+        domains:
+          type: array
+          items:
+            type: string
+          example: ["Fintech", "Cloud Infrastructure"]
+        company:
+          type: string
+          example: "Google"
+        role_title:
+          type: string
+          example: "Software Engineer III"
+        bio:
+          type: string
+          example: "Helping students crack product companies and technical interviews."
+        languages:
+          type: array
+          items:
+            type: string
+          example: ["English", "Hindi"]
+        weekly_capacity:
+          type: integer
+          default: 3
+        institution_id:
+          type: integer
+        department:
+          type: string
+        batch:
+          type: integer
+        societies:
+          type: array
+          items:
+            type: string
+      required:
+        - offers
+        - skills
+        - domains
+
+    GiverProfileResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        offers:
+          type: array
+          items:
+            type: string
+        topics:
+          type: array
+          items:
+            type: string
+        skills:
+          type: array
+          items:
+            type: object
+        domains:
+          type: array
+          items:
+            type: string
+        company:
+          type: string
+        role_title:
+          type: string
+        bio:
+          type: string
+        languages:
+          type: array
+          items:
+            type: string
+        weekly_capacity:
+          type: integer
+        institution_id:
+          type: integer
+        department:
+          type: string
+        batch:
+          type: integer
+        societies:
+          type: array
+          items:
+            type: string
+        has_embedding:
+          type: boolean
+        response_stats:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - user_id
+        - offers
+        - skills
+        - domains
+        - has_embedding
+
+    ScoreComponents:
+      type: object
+      properties:
+        expertise_fit:
+          type: number
+          format: float
+          example: 0.85
+        intent_fit:
+          type: number
+          format: float
+          example: 0.90
+        affinity:
+          type: number
+          format: float
+          example: 0.75
+        availability:
+          type: number
+          format: float
+          example: 0.80
+        rating:
+          type: number
+          format: float
+          example: 0.88
+        response_odds:
+          type: number
+          format: float
+          example: 0.92
+        cold_start_boost:
+          type: number
+          format: float
+          example: 0.08
+        total_score:
+          type: number
+          format: float
+          example: 0.84
+      required:
+        - expertise_fit
+        - intent_fit
+        - affinity
+        - availability
+        - rating
+        - response_odds
+        - total_score
+
+    RatingSummary:
+      type: object
+      properties:
+        band:
+          type: string
+          example: "Trusted"
+        smoothed_avg:
+          type: number
+          format: float
+          example: 4.5
+        total_sessions:
+          type: integer
+          example: 12
+        completion_rate:
+          type: number
+          format: float
+          example: 0.96
+      required:
+        - band
+        - smoothed_avg
+        - total_sessions
+        - completion_rate
+
+    AvailabilitySummary:
+      type: object
+      properties:
+        online:
+          type: boolean
+          example: true
+        capacity_left:
+          type: integer
+          example: 2
+      required:
+        - online
+        - capacity_left
+
+    GiverPublicCard:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+          example: "Aditi Sharma"
+        headline:
+          type: string
+          example: "Software Engineer III at Google"
+        company:
+          type: string
+        role_title:
+          type: string
+        bio:
+          type: string
+        offers:
+          type: array
+          items:
+            type: string
+        topics:
+          type: array
+          items:
+            type: string
+        skills:
+          type: array
+          items:
+            type: object
+        domains:
+          type: array
+          items:
+            type: string
+        languages:
+          type: array
+          items:
+            type: string
+        badges:
+          type: array
+          items:
+            type: string
+        band:
+          type: string
+          example: "Trusted"
+        rating_summary:
+          $ref: '#/components/schemas/RatingSummary'
+        availability_summary:
+          $ref: '#/components/schemas/AvailabilitySummary'
+        why_lines:
+          type: array
+          items:
+            type: string
+          example: ["Shares your Python skills", "Same college, 2 years ahead", "Online now"]
+      required:
+        - id
+        - full_name
+        - headline
+        - band
+        - rating_summary
+        - availability_summary
+
+    RecommendationItem:
+      type: object
+      properties:
+        giver:
+          $ref: '#/components/schemas/GiverPublicCard'
+        score_components:
+          $ref: '#/components/schemas/ScoreComponents'
+        why_lines:
+          type: array
+          items:
+            type: string
+        locked:
+          type: boolean
+          default: false
+        lock_reason:
+          type: string
+      required:
+        - giver
+        - score_components
+        - why_lines
+        - locked
+
+    RecommendationsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecommendationItem'
+        next_cursor:
+          type: string
+        scope:
+          type: string
+        locked:
+          type: boolean
+          default: false
+        lock_reason:
+          type: string
+      required:
+        - items
+        - scope

@@ -44,6 +44,8 @@ wheels/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+backend/uploads/
+uploads/
 
 # Flutter / Dart
 .dart_tool/
@@ -74,3 +76,9 @@ out/
 *~
 .DS_Store
 Thumbs.db
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+

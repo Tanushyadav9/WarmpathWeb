@@ -57,6 +57,8 @@ roles:
       - app/lib/features/discover/
       - contracts/modules/resume.yaml
       - contracts/modules/matching.yaml
+      - scripts/perf/
+      - docs/PERFORMANCE.md
 
   m3:
     allowed_prefixes:

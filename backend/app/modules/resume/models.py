@@ -1,5 +1,10 @@
-"""SQLAlchemy models for resume."""
-from app.core.db import Base
-from sqlalchemy import Column, Integer, String
+from app.core.models import (
+    Consent,
+    SkillTaxonomy,
+    StudentIntent,
+    StudentProfile,
+    utc_now,
+)
 
-# Module models will be defined here by M2
+__all__ = ["Consent", "SkillTaxonomy", "StudentIntent", "StudentProfile", "utc_now"]
+

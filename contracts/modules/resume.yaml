@@ -1,81 +1,288 @@
 paths:
   /resume:
     post:
-      summary: "Upload resume PDF for extraction"
+      summary: Upload student resume PDF or DOCX for skill extraction
+      description: Validates magic bytes, checks 5 MB / 5-page limits, requires DPDP consent, parses skills with Gemini.
+      tags: [resume]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
       responses:
-        "501":
-          description: Module not implemented
+        '202':
+          description: Resume accepted and queued for parsing
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /resume/profile:
-    get:
-      summary: "Retrieve parsed resume skills and entities"
-      responses:
-        "501":
-          description: Module not implemented
+                $ref: '#/components/schemas/ResumeUploadResponse'
+        '400':
+          description: Invalid file format or limit exceeded
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /resume/profile:
-    put:
-      summary: "Update or correct parsed resume entities"
-      responses:
-        "501":
-          description: Module not implemented
+                $ref: '#/components/schemas/AppError'
+        '403':
+          description: DPDP consent required
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /resume:
+                $ref: '#/components/schemas/AppError'
+        '422':
+          description: Unreadable scanned document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
     delete:
-      summary: "Delete uploaded resume and extracted vectors"
+      summary: Delete stored resume document and extracted vectors
+      tags: [resume]
       responses:
-        "501":
-          description: Module not implemented
+        '204':
+          description: Resume document, profile and embeddings permanently deleted
+
+  /resume/profile:
+    get:
+      summary: Retrieve parsed and student-edited resume profile
+      tags: [resume]
+      responses:
+        '200':
+          description: Merged student resume profile
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /me/intent:
+                $ref: '#/components/schemas/StudentProfileResponse'
+        '404':
+          description: No resume profile found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
     put:
-      summary: "Save 'what do you want next' intent prompt"
+      summary: Update student profile edits and re-embed
+      tags: [resume]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudentProfileUpdateRequest'
       responses:
-        "501":
-          description: Module not implemented
+        '200':
+          description: Profile edits saved and embedding refreshed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/StudentProfileResponse'
+
   /me/intent:
     get:
-      summary: "Retrieve current student intent prompt"
+      summary: Get student structured intent and career goal
+      tags: [resume]
       responses:
-        "501":
-          description: Module not implemented
+        '200':
+          description: Current intent specification
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/StudentIntentResponse'
+        '404':
+          description: No intent registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+    put:
+      summary: Set or update student structured intent
+      tags: [resume]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudentIntentUpdateRequest'
+      responses:
+        '200':
+          description: Intent structured by AI and saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudentIntentResponse'
+
   /me/consents:
     get:
-      summary: "Retrieve DPDP consent records"
+      summary: Get DPDP privacy and data processing consents
+      tags: [resume]
       responses:
-        "501":
-          description: Module not implemented
+        '200':
+          description: Consent status records
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /me/consents:
+                $ref: '#/components/schemas/ConsentsListResponse'
     put:
-      summary: "Update DPDP consent preferences"
+      summary: Update consent choices (withdrawing stops processing and purges derived data)
+      tags: [resume]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateConsentsRequest'
       responses:
-        "501":
-          description: Module not implemented
+        '200':
+          description: Consents updated
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/ConsentsListResponse'
+
+components:
+  schemas:
+    ResumeUploadResponse:
+      type: object
+      required: [resume_id, status]
+      properties:
+        resume_id: { type: string }
+        status: { type: string, example: "processing" }
+
+    EducationItem:
+      type: object
+      required: [degree, institution]
+      properties:
+        degree: { type: string }
+        institution: { type: string }
+        field_of_study: { type: string, nullable: true }
+        start_year: { type: integer, nullable: true }
+        end_year: { type: integer, nullable: true }
+        gpa: { type: string, nullable: true }
+
+    SkillItem:
+      type: object
+      required: [name, category]
+      properties:
+        name: { type: string }
+        category: { type: string }
+
+    ProjectItem:
+      type: object
+      required: [title, description]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        tech:
+          type: array
+          items: { type: string }
+
+    StudentProfileUpdateRequest:
+      type: object
+      properties:
+        education:
+          type: array
+          items: { $ref: '#/components/schemas/EducationItem' }
+        skills:
+          type: array
+          items: { $ref: '#/components/schemas/SkillItem' }
+        domains:
+          type: array
+          items: { type: string }
+        projects:
+          type: array
+          items: { $ref: '#/components/schemas/ProjectItem' }
+        experience_level: { type: string }
+        links: { type: object }
+
+    StudentProfileResponse:
+      type: object
+      required: [user_id, merged, has_embedding, updated_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        parsed: { type: object, nullable: true }
+        edited: { type: object, nullable: true }
+        merged: { type: object }
+        has_embedding: { type: boolean }
+        updated_at: { type: string, format: date-time }
+
+    StructuredIntent:
+      type: object
+      required: [goal, roles, domains]
+      properties:
+        goal: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+        domains:
+          type: array
+          items: { type: string }
+        urgency: { type: string }
+        help_type: { type: string }
+
+    StudentIntentUpdateRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        goal_type: { type: string, nullable: true }
+        target_roles:
+          type: array
+          items: { type: string }
+        target_domains:
+          type: array
+          items: { type: string }
+
+    StudentIntentResponse:
+      type: object
+      required: [user_id, raw_text, has_embedding, updated_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        raw_text: { type: string }
+        goal_type: { type: string, nullable: true }
+        target_roles:
+          type: array
+          items: { type: string }
+        target_domains:
+          type: array
+          items: { type: string }
+        structured: { $ref: '#/components/schemas/StructuredIntent' }
+        has_embedding: { type: boolean }
+        updated_at: { type: string, format: date-time }
+
+    ConsentItemResponse:
+      type: object
+      required: [purpose, granted, text_version]
+      properties:
+        purpose: { type: string }
+        granted: { type: boolean }
+        granted_at: { type: string, format: date-time, nullable: true }
+        withdrawn_at: { type: string, format: date-time, nullable: true }
+        text_version: { type: string }
+
+    ConsentsListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ConsentItemResponse' }
+
+    ConsentUpdateItem:
+      type: object
+      required: [purpose, granted]
+      properties:
+        purpose: { type: string }
+        granted: { type: boolean }
+
+    UpdateConsentsRequest:
+      type: object
+      required: [consents]
+      properties:
+        consents:
+          type: array
+          items: { $ref: '#/components/schemas/ConsentUpdateItem' }
+        text_version: { type: string, default: "v1.0" }
