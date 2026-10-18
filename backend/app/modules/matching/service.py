@@ -90,8 +90,8 @@ class MatchingService:
             capacity_reached = pres.get("capacity_reached", False)
             capacity_left = pres.get("capacity_left", 0)
 
-            # Rule: Giver disappears from matching if capacity is reached OR status is inactive
-            if capacity_reached or status == "inactive":
+            # Rule: Giver disappears from matching if capacity is reached, status is inactive, or giver is unverified/suspended
+            if not prof.is_verified or capacity_reached or status == "inactive":
                 continue
 
             skills_list = [s.strip() for s in (prof.skills or "").split(",") if s.strip()]
